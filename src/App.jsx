@@ -271,6 +271,14 @@ const ONLINE_REFERENCE_POOL = [
   'Mateus 28:20', 'João 11:25', 'Romanos 12:2', 'Efésios 4:32', 'Filipenses 1:6', 'Colossenses 3:15', 'Hebreus 4:16', 'Tiago 4:8'
 ];
 
+const CLOUD_VOICE_OPTIONS = [
+  { value: 'pt-BR-Neural2-F', label: 'Neural2 F (suave)' },
+  { value: 'pt-BR-Neural2-C', label: 'Neural2 C (equilibrada)' },
+  { value: 'pt-BR-Neural2-A', label: 'Neural2 A (clara)' },
+  { value: 'pt-BR-Wavenet-A', label: 'Wavenet A' },
+  { value: 'pt-BR-Wavenet-B', label: 'Wavenet B' },
+];
+
 const getVerseKey = (verse) => `${verse?.id ?? verse?.reference ?? 'verse'}::${verse?.reference ?? ''}`;
 
 export default function DevocionalApp() {
@@ -289,6 +297,7 @@ export default function DevocionalApp() {
   const [showExplanation, setShowExplanation] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceLabel, setVoiceLabel] = useState('Padrão');
+  const [selectedCloudVoice, setSelectedCloudVoice] = useState('pt-BR-Neural2-F');
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [standbyMode, setStandbyMode] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -323,6 +332,10 @@ export default function DevocionalApp() {
     moodLog: 5,
     referenceSearch: 8,
   };
+
+  useEffect(() => {
+    if (BACKEND_TTS_VOICE_NAME) setSelectedCloudVoice(BACKEND_TTS_VOICE_NAME);
+  }, [BACKEND_TTS_VOICE_NAME]);
 
   const restoreSavedState = () => {
     try {
@@ -663,7 +676,7 @@ export default function DevocionalApp() {
         body: JSON.stringify({
           text: humanizeSpeechText(text),
           languageCode: 'pt-BR',
-          voiceName: BACKEND_TTS_VOICE_NAME,
+          voiceName: selectedCloudVoice || BACKEND_TTS_VOICE_NAME,
           audioEncoding: 'MP3',
         }),
       });
@@ -700,7 +713,7 @@ export default function DevocionalApp() {
       const audio = new Audio(audioUrlRef.current);
       audio.preload = 'auto';
       audioRef.current = audio;
-      setVoiceLabel(`Google Cloud (${BACKEND_TTS_VOICE_NAME})`);
+      setVoiceLabel(`Google Cloud (${selectedCloudVoice || BACKEND_TTS_VOICE_NAME})`);
       setIsSpeaking(true);
 
       audio.onended = () => {
@@ -829,6 +842,10 @@ export default function DevocionalApp() {
     markChecklistAction('explanationRead');
     addJourneyAction('explanationReads');
     speakText(`Entendimento de hoje. ${currentVerse.ai_explanation}`);
+  };
+
+  const handleVoicePreview = () => {
+    speakText('Exemplo de voz suave. Deus está com você, com paz, cuidado e esperança para hoje.');
   };
 
   // --- NOVA INTEGRAÇÃO: API DE CONTEXTO ---
@@ -1190,14 +1207,14 @@ export default function DevocionalApp() {
 
   // --- APP PRINCIPAL ---
   return (
-    <div className="min-h-screen bg-[#F5F5F7] text-slate-800 font-sans flex flex-col overflow-hidden relative">
+    <div className="min-h-screen bg-[#F5F5F7] text-slate-800 font-sans flex flex-col overflow-x-hidden overflow-y-auto relative">
 
       {/* Background Decorativo Rico */}
       <div className="absolute top-0 left-0 w-full h-[40vh] bg-gradient-to-b from-blue-950 to-blue-900 rounded-b-[3rem] shadow-2xl z-0" />
       <div className="absolute top-0 right-0 w-64 h-64 bg-amber-500/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none" />
 
       {/* Header */}
-      <header className="relative z-10 flex justify-between items-center p-6 text-white">
+      <header className="relative z-10 flex justify-between items-center gap-3 px-4 sm:px-6 py-4 sm:py-6 text-white">
         <div className="flex items-center gap-3">
           <div className="p-1.5 bg-white/10 rounded-xl backdrop-blur-md border border-white/10 shadow-lg">
             <img src="/icon-app.png" alt="LUMINA" className="w-9 h-9 object-contain" />
@@ -1207,7 +1224,7 @@ export default function DevocionalApp() {
             <span className="text-[10px] text-blue-200 uppercase tracking-widest font-semibold">Devocional Diário</span>
           </div>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-2 sm:gap-3">
           <div className={`flex items-center px-3 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase border ${isOnline ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-red-500/20 text-red-300 border-red-500/30'}`}>
             {isOnline ? 'Conectado' : 'Sem internet'}
           </div>
@@ -1227,7 +1244,7 @@ export default function DevocionalApp() {
       </header>
 
       {/* Main Content */}
-      <main className="relative z-10 flex-1 flex flex-col px-6 pt-2 pb-6 max-w-3xl mx-auto w-full">
+      <main className="relative z-10 flex-1 flex flex-col px-4 sm:px-6 pt-2 pb-24 sm:pb-8 max-w-3xl mx-auto w-full">
         <div className="mb-3 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
           <div className="flex items-center justify-between mb-3 text-[11px] uppercase tracking-widest font-bold text-slate-400">
             <div className="flex items-center gap-2">
@@ -1324,6 +1341,30 @@ export default function DevocionalApp() {
             </div>
           )}
         </div>
+
+        {USE_BACKEND_TTS && (
+          <div className="mb-4 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
+            <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Voz natural (Google Cloud)</p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                value={selectedCloudVoice}
+                onChange={(event) => setSelectedCloudVoice(event.target.value)}
+                className="flex-1 h-11 px-3 rounded-xl border border-slate-200 text-sm text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
+              >
+                {CLOUD_VOICE_OPTIONS.map((voice) => (
+                  <option key={voice.value} value={voice.value}>{voice.label}</option>
+                ))}
+              </select>
+              <button
+                onClick={handleVoicePreview}
+                className="h-11 px-4 rounded-xl bg-indigo-600 text-white text-xs font-bold tracking-wide uppercase hover:bg-indigo-500"
+              >
+                Ouvir exemplo
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-2">Voz atual: {voiceLabel}</p>
+          </div>
+        )}
 
         <div className="flex-1 flex flex-col justify-center py-4">
           <div className={`bg-white rounded-[2rem] shadow-[0_20px_50px_-12px_rgba(30,58,138,0.2)] p-8 md:p-12 relative overflow-hidden transition-all duration-500 border border-slate-100 ${isLoadingVerse ? 'opacity-90 scale-[0.99] blur-sm' : 'opacity-100 scale-100'}`}>

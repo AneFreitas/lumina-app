@@ -47,3 +47,20 @@ O app chama o endpoint `POST /api/tts` no backend com:
 ```
 
 Resposta esperada: `audio/mpeg` (blob) **ou** JSON com `audioBase64`.
+
+### Subir servidor local de voz natural (Google TTS)
+
+1. Preencha `GOOGLE_TTS_API_KEY` no `.env.local`.
+2. Inicie o backend de voz:
+
+```bash
+npm run tts:server
+```
+
+3. Em outro terminal, inicie o app:
+
+```bash
+npm run dev
+```
+
+Com `VITE_USE_BACKEND_TTS=true`, o app usa voz Google Neural2 (menos robótica) e faz fallback para voz nativa só se o backend falhar.
