@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import {
   BookOpen,
   ChevronRight,
@@ -7,14 +9,13 @@ import {
   BellOff,
   Sparkles,
   Share2,
+  Volume2,
+  VolumeX,
+  Check,
   Maximize2,
   Minimize2,
-  Clock,
   Quote,
-  Wifi,
-  WifiOff,
   Info,
-  Sun,
   Moon,
   Globe
 } from 'lucide-react';
@@ -106,11 +107,68 @@ const translateBook = (bookName) => {
   return map[bookName] || bookName;
 };
 
+const normalizeText = (value = '') => value
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .trim();
+
+const BOOK_ALIASES = {
+  jo: 'João',
+  joao: 'João',
+  jn: 'João',
+  mt: 'Mateus',
+  mc: 'Marcos',
+  lc: 'Lucas',
+  rm: 'Romanos',
+  fp: 'Filipenses',
+  is: 'Isaías',
+  jr: 'Jeremias',
+  js: 'Josué',
+  pv: 'Provérbios',
+  sl: 'Salmos',
+  sm: 'Salmos',
+  salmo: 'Salmos',
+  salmos: 'Salmos',
+  ap: 'Apocalipse',
+  gn: 'Gênesis',
+  ex: 'Êxodo',
+};
+
+const normalizeReferenceInput = (reference = '') => {
+  const cleaned = reference
+    .replace(/\s+/g, ' ')
+    .replace(/\s*:\s*/g, ':')
+    .trim();
+
+  const match = cleaned.match(/^((?:[1-3]\s*)?[\p{L}.]+(?:\s+[\p{L}.]+)*)\s+(\d+)[:.]?(\d+)$/u);
+  if (!match) return cleaned;
+
+  const [, rawBook, chapter, verse] = match;
+  const bookKey = normalizeText(rawBook.replace(/\./g, ''));
+  const normalizedBook = BOOK_ALIASES[bookKey] || rawBook.trim();
+  return `${normalizedBook} ${chapter}:${verse}`;
+};
+
+const buildReferenceCandidates = (reference = '') => {
+  const normalized = normalizeReferenceInput(reference);
+  const accentless = normalizeText(normalized)
+    .replace(/\b1\s/g, '1 ')
+    .replace(/\b2\s/g, '2 ')
+    .replace(/\b3\s/g, '3 ');
+
+  return Array.from(new Set([
+    reference.trim(),
+    normalized,
+    accentless,
+  ].filter(Boolean)));
+};
+
 // --- SIMULADOR DE IA (FALLBACK) ---
 // Usado apenas se a API online falhar
 const generateStaticFallback = (text) => {
   if (text.includes('amor')) return "O amor Ágape é a essência do caráter divino, exigindo ação e não apenas sentimento.";
-  if (t.includes('senhor')) return "Reconhecer o senhorio de Cristo coloca todas as outras preocupações em perspectiva.";
+  if (text.includes('senhor')) return "Reconhecer o senhorio de Cristo coloca todas as outras preocupações em perspectiva.";
   return "Este versículo é uma âncora para a alma, convidando-nos a confiar na fidelidade imutável de Deus.";
 };
 
@@ -118,80 +176,659 @@ const formatTime = (date) => {
   return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 };
 
+const APP_STORAGE_KEY = 'lumina_app_state_v1';
+const BRAZIL_TIMEZONE = 'America/Sao_Paulo';
+
+const getBrasiliaDateTag = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BRAZIL_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+  return `${year}-${month}-${day}`;
+};
+
+const getBrasiliaClock = (date = new Date()) => {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: BRAZIL_TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+};
+
+const getBrasiliaWeekday = (date = new Date()) => {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: BRAZIL_TIMEZONE,
+    weekday: 'short',
+  }).format(date).replace('.', '');
+};
+
+const getTodayTag = () => getBrasiliaDateTag(new Date());
+
+const getMoodScore = (moodRaw) => {
+  const mood = moodRaw.toLowerCase();
+  if (mood.includes('gratid') || mood.includes('feliz') || mood.includes('paz') || mood.includes('alegr')) return 2;
+  if (mood.includes('calm') || mood.includes('esper')) return 1;
+  if (mood.includes('ans') || mood.includes('medo') || mood.includes('preocup') || mood.includes('triste') || mood.includes('dor')) return -2;
+  if (mood.includes('cans') || mood.includes('desanim')) return -1;
+  return 0;
+};
+
+const shuffleVerses = (verses) => {
+  const shuffled = [...verses];
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
+  }
+  return shuffled;
+};
+
+const buildComfortMessage = (moodRaw) => {
+  const mood = moodRaw.toLowerCase();
+  if (mood.includes('ans') || mood.includes('medo') || mood.includes('preocup')) {
+    return 'Você não está sozinho(a). Respire fundo: Deus cuida de você hoje, um passo de cada vez.';
+  }
+  if (mood.includes('triste') || mood.includes('dor') || mood.includes('cans')) {
+    return 'Seu coração importa. Deus acolhe sua dor e renova suas forças no tempo certo.';
+  }
+  if (mood.includes('gratid') || mood.includes('feliz') || mood.includes('paz')) {
+    return 'Que lindo ver seu coração grato. Continue firme: a paz de Deus transborda em você.';
+  }
+  return 'Obrigado por abrir seu coração. Deus te vê, te ama e caminha com você em cada detalhe.';
+};
+
+const humanizeSpeechText = (text = '') => text
+  .replace(/\s+/g, ' ')
+  .replace(/:/g, ', ')
+  .replace(/;/g, '. ')
+  .replace(/\s*,\s*/g, ', ')
+  .replace(/\.(?=\S)/g, '. ')
+  .trim();
+
+const splitSpeechSegments = (text = '') => {
+  const normalized = humanizeSpeechText(text);
+  return normalized
+    .split(/(?<=[.!?])\s+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .slice(0, 12);
+};
+
+const ONLINE_REFERENCE_POOL = [
+  'João 3:16', 'Salmos 23:1', 'Salmos 23:4', 'Salmos 27:1', 'Salmos 34:8', 'Salmos 37:5', 'Salmos 46:1', 'Salmos 91:1',
+  'Salmos 91:2', 'Salmos 119:105', 'Provérbios 3:5', 'Provérbios 3:6', 'Provérbios 18:10', 'Isaías 40:31', 'Isaías 41:10', 'Isaías 43:2',
+  'Jeremias 29:11', 'Lamentações 3:22', 'Lamentações 3:23', 'Josué 1:9', 'Mateus 5:14', 'Mateus 6:33', 'Mateus 11:28', 'Mateus 19:26',
+  'Marcos 10:27', 'Lucas 1:37', 'João 8:12', 'João 10:10', 'João 14:6', 'João 14:27', 'João 15:5', 'Atos 1:8',
+  'Romanos 5:8', 'Romanos 8:1', 'Romanos 8:28', 'Romanos 8:37', 'Romanos 10:9', '1 Coríntios 10:13', '1 Coríntios 13:4', '2 Coríntios 5:7',
+  '2 Coríntios 12:9', 'Gálatas 5:22', 'Efésios 2:8', 'Efésios 3:20', 'Efésios 6:10', 'Filipenses 4:6', 'Filipenses 4:7', 'Filipenses 4:13',
+  'Colossenses 3:23', '2 Timóteo 1:7', 'Hebreus 11:1', 'Hebreus 13:8', 'Tiago 1:5', '1 Pedro 5:7', '1 João 1:9', '1 João 4:8',
+  '1 João 4:19', 'Apocalipse 3:20', 'Apocalipse 21:4', 'Salmos 121:1', 'Salmos 121:2', 'Salmos 126:5', 'Isaías 26:3', 'Isaías 55:8',
+  'Mateus 28:20', 'João 11:25', 'Romanos 12:2', 'Efésios 4:32', 'Filipenses 1:6', 'Colossenses 3:15', 'Hebreus 4:16', 'Tiago 4:8'
+];
+
+const getVerseKey = (verse) => `${verse?.id ?? verse?.reference ?? 'verse'}::${verse?.reference ?? ''}`;
+
 export default function DevocionalApp() {
   const [history, setHistory] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [currentVerse, setCurrentVerse] = useState(null);
+  const [seenVerses, setSeenVerses] = useState([]);
+  const [referenceInput, setReferenceInput] = useState('');
+  const [recentReferences, setRecentReferences] = useState([]);
+  const [journeyStats, setJourneyStats] = useState({ verseReads: 0, explanationReads: 0, moodLogs: 0, referenceSearches: 0 });
+  const [moodInput, setMoodInput] = useState('');
+  const [comfortMessage, setComfortMessage] = useState('');
+  const [dailyChecklist, setDailyChecklist] = useState({});
+  const [moodHistory, setMoodHistory] = useState([]);
   const [isExplaining, setIsExplaining] = useState(false);
   const [showExplanation, setShowExplanation] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceLabel, setVoiceLabel] = useState('Padrão');
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [standbyMode, setStandbyMode] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isLoadingVerse, setIsLoadingVerse] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  const [localCycle, setLocalCycle] = useState([]);
+  const [localCycleIndex, setLocalCycleIndex] = useState(0);
+  const [onlineCycle, setOnlineCycle] = useState([]);
+  const [onlineCycleIndex, setOnlineCycleIndex] = useState(0);
+  const [notificationCycle, setNotificationCycle] = useState([]);
+  const [notificationCycleIndex, setNotificationCycleIndex] = useState(0);
+  const [verseProgress, setVerseProgress] = useState({});
+  const isNativePlatform = Capacitor.isNativePlatform();
+  const USE_BACKEND_TTS = String(import.meta.env.VITE_USE_BACKEND_TTS ?? 'false').toLowerCase() === 'true';
+  const BACKEND_TTS_BASE_URL = String(import.meta.env.VITE_TTS_API_BASE_URL ?? '').trim();
+  const BACKEND_TTS_VOICE_NAME = String(import.meta.env.VITE_TTS_VOICE_NAME ?? 'pt-BR-Neural2-B');
 
   const notificationInterval = useRef(null);
+  const sendNotificationRef = useRef(null);
+  const speechRef = useRef(null);
+  const audioRef = useRef(null);
+  const audioUrlRef = useRef(null);
+  const NATIVE_NOTIFICATION_BASE_ID = 1000;
+  const NOTIFICATION_DAYS_AHEAD = 15;
+  const NOTIFICATIONS_PER_DAY = 3;
+  const NATIVE_NOTIFICATION_COUNT = NOTIFICATION_DAYS_AHEAD * NOTIFICATIONS_PER_DAY;
+  const DAILY_REMINDER_BASE_ID = 3000;
+  const DAILY_REMINDER_COUNT = 30;
+  const JOURNEY_POINTS = {
+    verseRead: 10,
+    explanationRead: 15,
+    moodLog: 5,
+    referenceSearch: 8,
+  };
+
+  const restoreSavedState = () => {
+    try {
+      const rawState = localStorage.getItem(APP_STORAGE_KEY);
+      if (!rawState) return false;
+
+      const parsed = JSON.parse(rawState);
+      if (!Array.isArray(parsed.history) || parsed.history.length === 0) return false;
+
+      setHistory(parsed.history);
+      const safeIndex = typeof parsed.currentIndex === 'number'
+        ? Math.min(Math.max(parsed.currentIndex, 0), parsed.history.length - 1)
+        : parsed.history.length - 1;
+      setCurrentIndex(safeIndex);
+      setCurrentVerse(parsed.history[safeIndex]);
+
+      if (Array.isArray(parsed.localCycle)) setLocalCycle(parsed.localCycle);
+      if (typeof parsed.localCycleIndex === 'number') setLocalCycleIndex(parsed.localCycleIndex);
+      if (Array.isArray(parsed.onlineCycle)) setOnlineCycle(parsed.onlineCycle);
+      if (typeof parsed.onlineCycleIndex === 'number') setOnlineCycleIndex(parsed.onlineCycleIndex);
+      if (Array.isArray(parsed.notificationCycle)) setNotificationCycle(parsed.notificationCycle);
+      if (typeof parsed.notificationCycleIndex === 'number') setNotificationCycleIndex(parsed.notificationCycleIndex);
+      if (Array.isArray(parsed.seenVerses)) setSeenVerses(parsed.seenVerses);
+      if (parsed.verseProgress && typeof parsed.verseProgress === 'object') setVerseProgress(parsed.verseProgress);
+      if (Array.isArray(parsed.recentReferences)) setRecentReferences(parsed.recentReferences.slice(0, 3));
+      if (parsed.journeyStats && typeof parsed.journeyStats === 'object') {
+        setJourneyStats({
+          verseReads: Number(parsed.journeyStats.verseReads) || 0,
+          explanationReads: Number(parsed.journeyStats.explanationReads) || 0,
+          moodLogs: Number(parsed.journeyStats.moodLogs) || 0,
+          referenceSearches: Number(parsed.journeyStats.referenceSearches) || 0,
+        });
+      }
+      setNotificationsEnabled(Boolean(parsed.notificationsEnabled));
+      if (parsed.dailyChecklist && typeof parsed.dailyChecklist === 'object') setDailyChecklist(parsed.dailyChecklist);
+      if (Array.isArray(parsed.moodHistory)) setMoodHistory(parsed.moodHistory);
+
+      return true;
+    } catch (error) {
+      console.error('Falha ao restaurar estado:', error);
+      return false;
+    }
+  };
 
   useEffect(() => {
-    if (!document.querySelector('script[src*="tailwindcss.com"]')) {
-      const script = document.createElement('script');
-      script.src = "https://cdn.tailwindcss.com";
-      document.head.appendChild(script);
+    const restored = restoreSavedState();
+    if (!restored) {
+      const firstCycle = shuffleVerses(LOCAL_DATABASE);
+      const firstVerse = { ...firstCycle[0], source: 'local' };
+      setLocalCycle(firstCycle);
+      setLocalCycleIndex(1);
+      setHistory([firstVerse]);
+      setCurrentIndex(0);
+      setCurrentVerse(firstVerse);
     }
 
-    handleNextVerse();
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    window.addEventListener('online', () => setIsOnline(true));
-    window.addEventListener('offline', () => setIsOnline(false));
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
 
     return () => {
       clearInterval(timer);
-      window.removeEventListener('online', () => setIsOnline(true));
-      window.removeEventListener('offline', () => setIsOnline(false));
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
+      }
+      if (speechRef.current) window.speechSynthesis.cancel();
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
   useEffect(() => {
-    if (notificationsEnabled) {
+    if (history.length === 0) return;
+    const payload = {
+      history: history.slice(-200),
+      currentIndex,
+      localCycle,
+      localCycleIndex,
+      onlineCycle,
+      onlineCycleIndex,
+      notificationCycle,
+      notificationCycleIndex,
+      seenVerses,
+      verseProgress,
+      recentReferences: recentReferences.slice(0, 3),
+      journeyStats,
+      notificationsEnabled,
+      dailyChecklist,
+      moodHistory: moodHistory.slice(-120),
+      lastSeenAt: Date.now(),
+      lastSeenDay: getTodayTag(),
+    };
+    localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(payload));
+  }, [history, currentIndex, localCycle, localCycleIndex, onlineCycle, onlineCycleIndex, notificationCycle, notificationCycleIndex, seenVerses, verseProgress, recentReferences, journeyStats, notificationsEnabled, dailyChecklist, moodHistory]);
+
+  useEffect(() => {
+    if (notificationsEnabled && !isNativePlatform) {
       notificationInterval.current = setInterval(() => {
-        sendNotification();
-      }, 7200000);
+        sendNotificationRef.current?.();
+      }, 8 * 60 * 60 * 1000);
     } else {
       if (notificationInterval.current) clearInterval(notificationInterval.current);
     }
-    return () => clearInterval(notificationInterval.current);
-  }, [notificationsEnabled]);
+    return () => {
+      if (notificationInterval.current) clearInterval(notificationInterval.current);
+    };
+  }, [notificationsEnabled, isNativePlatform]);
+
+  const getNextCycleVerse = () => {
+    const recentReferences = history.slice(-5).map((verse) => verse.reference);
+    let activeCycle = localCycle;
+    let activeIndex = localCycleIndex;
+
+    if (activeCycle.length === 0 || activeIndex >= activeCycle.length) {
+      const freshPool = LOCAL_DATABASE.filter((verse) => !recentReferences.includes(verse.reference));
+      activeCycle = shuffleVerses(freshPool.length > 0 ? freshPool : LOCAL_DATABASE);
+      if (currentVerse && activeCycle.length > 1 && activeCycle[0].id === currentVerse.id) {
+        const [firstVerse, secondVerse] = activeCycle;
+        activeCycle[0] = secondVerse;
+        activeCycle[1] = firstVerse;
+      }
+      activeIndex = 0;
+    }
+
+    const selectedVerse = { ...activeCycle[activeIndex], source: 'local' };
+    setLocalCycle(activeCycle);
+    setLocalCycleIndex(activeIndex + 1);
+    return selectedVerse;
+  };
+
+  const getNextOnlineReference = () => {
+    const recentRefs = history.slice(-10).map((verse) => normalizeText(verse.reference));
+    let activeCycle = onlineCycle;
+    let activeIndex = onlineCycleIndex;
+
+    if (activeCycle.length === 0 || activeIndex >= activeCycle.length) {
+      const freshPool = ONLINE_REFERENCE_POOL.filter((reference) => !recentRefs.includes(normalizeText(reference)));
+      activeCycle = shuffleVerses(freshPool.length > 0 ? freshPool : ONLINE_REFERENCE_POOL);
+      activeIndex = 0;
+    }
+
+    const selectedReference = activeCycle[activeIndex];
+    setOnlineCycle(activeCycle);
+    setOnlineCycleIndex(activeIndex + 1);
+    return selectedReference;
+  };
+
+  const markVerseProgress = (patch) => {
+    if (!currentVerse) return;
+    const verseKey = getVerseKey(currentVerse);
+    setVerseProgress((previous) => ({
+      ...previous,
+      [verseKey]: {
+        heard: false,
+        completed: false,
+        ...(previous[verseKey] || {}),
+        ...patch,
+      },
+    }));
+  };
+
+  const getNextNotificationReferences = (count) => {
+    let activeCycle = notificationCycle;
+    let activeIndex = notificationCycleIndex;
+    const references = [];
+
+    while (references.length < count) {
+      if (activeCycle.length === 0 || activeIndex >= activeCycle.length) {
+        activeCycle = shuffleVerses(ONLINE_REFERENCE_POOL);
+        activeIndex = 0;
+      }
+
+      references.push(activeCycle[activeIndex]);
+      activeIndex += 1;
+    }
+
+    setNotificationCycle(activeCycle);
+    setNotificationCycleIndex(activeIndex);
+    return references;
+  };
+
+  const fetchNotificationVerse = async (reference) => {
+    for (const candidate of buildReferenceCandidates(reference)) {
+      try {
+        const response = await fetch(`https://bible-api.com/${encodeURIComponent(candidate)}?translation=almeida`);
+        if (!response.ok) continue;
+        const data = await response.json();
+        if (!data?.text) continue;
+
+        const verseText = (data.text || '').replace(/\n/g, ' ').trim();
+        const firstVerse = Array.isArray(data.verses) && data.verses.length > 0 ? data.verses[0] : null;
+        const chapter = firstVerse?.chapter ?? data.chapter;
+        const verseNumber = firstVerse?.verse ?? data.verse;
+        const translatedBook = translateBook(firstVerse?.book_name || data.book_name || '');
+        const normalizedReference = chapter && verseNumber
+          ? `${translatedBook} ${chapter}:${verseNumber}`
+          : (data.reference || reference);
+
+        return {
+          id: `notification-${normalizedReference}`,
+          reference: normalizedReference,
+          text: verseText,
+          source: 'online'
+        };
+      } catch (error) {
+        console.error('Erro ao buscar versículo da notificação:', error);
+      }
+    }
+
+    const localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference) === normalizeText(reference));
+    return localMatch ? { ...localMatch, source: 'local' } : null;
+  };
+
+  const formatNotificationBody = (verse) => {
+    const preview = verse.text.length > 120 ? `${verse.text.substring(0, 120)}...` : verse.text;
+    return `${verse.reference} — ${preview}`;
+  };
+
+  const buildUnexpectedNotificationDate = (dayOffset, slotIndex) => {
+    const baseHours = [9, 14, 20];
+    const at = new Date();
+    at.setDate(at.getDate() + dayOffset + 1);
+    at.setHours(baseHours[slotIndex], 7 + ((dayOffset * 13 + slotIndex * 11) % 43), 0, 0);
+    return at;
+  };
+
+  const clearNativeNotifications = async () => {
+    const ids = Array.from({ length: NATIVE_NOTIFICATION_COUNT }, (_, index) => ({ id: NATIVE_NOTIFICATION_BASE_ID + index }));
+    await LocalNotifications.cancel({ notifications: ids });
+  };
+
+  const scheduleNativeDevotionalNotifications = async () => {
+    await clearNativeNotifications();
+
+    const references = getNextNotificationReferences(NATIVE_NOTIFICATION_COUNT);
+    const fetchedVerses = await Promise.all(references.map((reference) => fetchNotificationVerse(reference)));
+    const notifications = fetchedVerses
+      .map((verse, index) => {
+        if (!verse) return null;
+        const dayOffset = Math.floor(index / NOTIFICATIONS_PER_DAY);
+        const slotIndex = index % NOTIFICATIONS_PER_DAY;
+        return {
+          id: NATIVE_NOTIFICATION_BASE_ID + index,
+          title: 'LUMINA: Versículo inesperado',
+          body: formatNotificationBody(verse),
+          schedule: {
+            at: buildUnexpectedNotificationDate(dayOffset, slotIndex),
+            allowWhileIdle: true,
+          }
+        };
+      })
+      .filter(Boolean);
+
+    await LocalNotifications.schedule({ notifications });
+  };
 
   const toggleNotifications = async () => {
     if (!notificationsEnabled) {
-      if (!("Notification" in window)) {
-        alert("Este navegador não suporta notificações de sistema.");
-        return;
-      }
-      const permission = await Notification.requestPermission();
-      if (permission === "granted") {
-        setNotificationsEnabled(true);
-        new Notification("LUMINA Ativado", {
-          body: "Você receberá versículos de sabedoria a cada 2 horas.",
-          icon: "/icon.png"
-        });
+      if (isNativePlatform) {
+        const permission = await LocalNotifications.requestPermissions();
+        if (permission.display === 'granted') {
+          await scheduleNativeDevotionalNotifications();
+          setNotificationsEnabled(true);
+          alert('Notificações ativas. Você receberá 3 versículos inesperados por dia, sem repetição por 15 dias e respeitando o ciclo disponível.');
+        } else {
+          alert('Permissão negada para notificações.');
+          setNotificationsEnabled(false);
+        }
       } else {
-        alert("Permissão negada para notificações.");
-        setNotificationsEnabled(false);
+        if (!("Notification" in window)) {
+          alert("Este navegador não suporta notificações de sistema.");
+          return;
+        }
+        const permission = await Notification.requestPermission();
+        if (permission === "granted") {
+          setNotificationsEnabled(true);
+          new Notification("LUMINA ativado", {
+            body: "Você receberá 3 versículos inesperados por dia.",
+            icon: "/icon.png"
+          });
+        } else {
+          alert("Permissão negada para notificações.");
+          setNotificationsEnabled(false);
+        }
       }
     } else {
+      if (isNativePlatform) {
+        await clearNativeNotifications();
+      }
       setNotificationsEnabled(false);
     }
   };
 
-  const sendNotification = () => {
-    const randomV = LOCAL_DATABASE[Math.floor(Math.random() * LOCAL_DATABASE.length)];
-    if (Notification.permission === "granted") {
-      new Notification("LUMINA: Versículo", {
-        body: `${randomV.reference} - ${randomV.text.substring(0, 60)}...`,
+  const sendNotification = async () => {
+    const [reference] = getNextNotificationReferences(1);
+    const verse = await fetchNotificationVerse(reference);
+    if (Notification.permission === "granted" && verse) {
+      new Notification("LUMINA: Versículo inesperado", {
+        body: formatNotificationBody(verse),
         icon: "/icon.png"
       });
     }
+  };
+
+  sendNotificationRef.current = sendNotification;
+
+  const stopSpeech = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+    window.speechSynthesis.cancel();
+    speechRef.current = null;
+    setIsSpeaking(false);
+  };
+
+  const speakWithBackendTTS = async (text) => {
+    if (!USE_BACKEND_TTS || !BACKEND_TTS_BASE_URL) return false;
+
+    try {
+      const response = await fetch(`${BACKEND_TTS_BASE_URL}/api/tts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: humanizeSpeechText(text),
+          languageCode: 'pt-BR',
+          voiceName: BACKEND_TTS_VOICE_NAME,
+          audioEncoding: 'MP3',
+        }),
+      });
+
+      if (!response.ok) return false;
+
+      const contentType = response.headers.get('content-type') || '';
+      let audioBlob = null;
+
+      if (contentType.includes('application/json')) {
+        const payload = await response.json();
+        const audioBase64 = payload?.audioBase64 || payload?.audioContentBase64 || payload?.audioContent;
+        if (!audioBase64) return false;
+        const binary = atob(audioBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        audioBlob = new Blob([bytes], { type: payload?.mimeType || 'audio/mpeg' });
+      } else {
+        audioBlob = await response.blob();
+      }
+
+      if (!audioBlob || audioBlob.size === 0) return false;
+
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+
+      audioUrlRef.current = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrlRef.current);
+      audio.preload = 'auto';
+      audioRef.current = audio;
+      setVoiceLabel(`Google Cloud (${BACKEND_TTS_VOICE_NAME})`);
+      setIsSpeaking(true);
+
+      audio.onended = () => {
+        if (audioUrlRef.current) {
+          URL.revokeObjectURL(audioUrlRef.current);
+          audioUrlRef.current = null;
+        }
+        audioRef.current = null;
+        setIsSpeaking(false);
+      };
+
+      audio.onerror = () => {
+        if (audioUrlRef.current) {
+          URL.revokeObjectURL(audioUrlRef.current);
+          audioUrlRef.current = null;
+        }
+        audioRef.current = null;
+        setIsSpeaking(false);
+      };
+
+      await audio.play();
+      return true;
+    } catch (error) {
+      console.error('Falha ao reproduzir TTS do backend:', error);
+      return false;
+    }
+  };
+
+  const chooseComfortVoice = () => {
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return null;
+
+    const portugueseVoices = voices.filter((voice) => /pt-BR|pt_BR|Portuguese/i.test(`${voice.lang} ${voice.name}`));
+    if (portugueseVoices.length === 0) return voices[0] || null;
+
+    const avoidTokens = ['google portugues do brasil', 'google translate', 'translate'];
+    const preferredPool = portugueseVoices.filter((voice) => {
+      const name = voice.name.toLowerCase();
+      return !avoidTokens.some((token) => name.includes(token));
+    });
+
+    const pool = preferredPool.length > 0 ? preferredPool : portugueseVoices;
+    const prioritizedTokens = ['neural', 'natural', 'microsoft', 'luciana', 'francisca', 'helena', 'antonio', 'daniel', 'ricardo', 'felipe', 'samsung', 'apple'];
+
+    for (const token of prioritizedTokens) {
+      const found = pool.find((voice) => voice.name.toLowerCase().includes(token));
+      if (found) return found;
+    }
+
+    return pool[0];
+  };
+
+  const speakText = async (text) => {
+    if (!text) return;
+    if (isSpeaking) {
+      stopSpeech();
+      return;
+    }
+
+    const backendPlayed = await speakWithBackendTTS(text);
+    if (backendPlayed) return;
+    if (!('speechSynthesis' in window)) return;
+
+    const selectedVoice = chooseComfortVoice();
+    const segments = splitSpeechSegments(text);
+    if (segments.length === 0) return;
+
+    if (selectedVoice) setVoiceLabel(selectedVoice.name);
+
+    let queueIndex = 0;
+    setIsSpeaking(true);
+    window.speechSynthesis.cancel();
+
+    const speakNext = () => {
+      if (queueIndex >= segments.length) {
+        speechRef.current = null;
+        setIsSpeaking(false);
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(segments[queueIndex]);
+      if (selectedVoice) utterance.voice = selectedVoice;
+      utterance.lang = 'pt-BR';
+      utterance.rate = 0.86;
+      utterance.pitch = 1.02;
+      utterance.volume = 0.95;
+      utterance.onend = () => {
+        queueIndex += 1;
+        setTimeout(speakNext, 120);
+      };
+      utterance.onerror = () => {
+        speechRef.current = null;
+        setIsSpeaking(false);
+      };
+
+      speechRef.current = utterance;
+      window.speechSynthesis.speak(utterance);
+    };
+
+    speakNext();
+  };
+
+  const handleReadVerse = () => {
+    if (!currentVerse) return;
+    saveSeenVerse(currentVerse);
+    addJourneyAction('verseReads');
+    markVerseProgress({ heard: true });
+    speakText(`Versículo de hoje, ${currentVerse.reference}. Ouça com calma. ${currentVerse.text}`);
+  };
+
+  const handleMarkVerseAsRead = () => {
+    if (!currentVerse) return;
+    const verseState = verseProgress[getVerseKey(currentVerse)] || { heard: false, completed: false };
+    if (!verseState.heard) {
+      alert('Antes de avançar, ouça o versículo atual.');
+      return;
+    }
+    saveSeenVerse(currentVerse);
+    markChecklistAction('verseRead');
+    markVerseProgress({ completed: true });
+  };
+
+  const handleReadExplanation = () => {
+    if (!currentVerse) return;
+    saveSeenVerse(currentVerse);
+    markChecklistAction('explanationRead');
+    addJourneyAction('explanationReads');
+    speakText(`Entendimento de hoje. ${currentVerse.ai_explanation}`);
   };
 
   // --- NOVA INTEGRAÇÃO: API DE CONTEXTO ---
@@ -225,37 +862,95 @@ export default function DevocionalApp() {
     }
   };
 
-  const fetchFromAPI = async () => {
+  const fetchByReferenceFromAPI = async (referenceQuery) => {
     try {
-      // 1. Busca o Versículo
-      const response = await fetch('https://bible-api.com/?random=verse&translation=almeida');
-      if (!response.ok) throw new Error('Falha na API da Bíblia');
-      const data = await response.json();
+      let data = null;
 
-      const ptBookName = translateBook(data.book_name);
+      for (const candidate of buildReferenceCandidates(referenceQuery)) {
+        const response = await fetch(`https://bible-api.com/${encodeURIComponent(candidate)}?translation=almeida`);
+        if (!response.ok) continue;
+        data = await response.json();
+        if (data?.text) break;
+      }
 
-      // 2. Busca o Entendimento (Contexto) Online
-      let context = await fetchContextFromWikipedia(ptBookName);
+      if (!data?.text) throw new Error('Referência não encontrada na API');
 
-      // 3. Se falhar, usa o gerador local melhorado
+      const verseText = (data.text || '').replace(/\n/g, ' ').trim();
+      if (!verseText) return null;
+
+      const firstVerse = Array.isArray(data.verses) && data.verses.length > 0 ? data.verses[0] : null;
+      const chapter = firstVerse?.chapter ?? data.chapter;
+      const verseNumber = firstVerse?.verse ?? data.verse;
+      const translatedBook = translateBook(firstVerse?.book_name || data.book_name || '');
+      const normalizedReference = chapter && verseNumber
+        ? `${translatedBook} ${chapter}:${verseNumber}`
+        : (data.reference || referenceQuery);
+
+      let context = await fetchContextFromWikipedia(translatedBook || normalizedReference.split(' ')[0]);
       if (!context) {
-        context = `Reflexão sobre ${ptBookName}: ` + generateStaticFallback(data.text);
+        context = `Reflexão sobre ${translatedBook || normalizedReference}: ` + generateStaticFallback(verseText);
       }
 
       return {
-        id: `api-${Date.now()}`,
-        reference: `${ptBookName} ${data.chapter}:${data.verse}`,
-        text: data.text.replace(/\n/g, ' '),
+        id: `api-search-${Date.now()}`,
+        reference: normalizedReference,
+        text: verseText,
         ai_explanation: context,
         source: 'online'
       };
     } catch (error) {
-      console.error("Erro geral:", error);
+      console.error('Erro na busca por referência:', error);
       return null;
     }
   };
 
+  const saveSeenVerse = (verse) => {
+    if (!verse) return;
+    setSeenVerses((previous) => {
+      const exists = previous.some((v) => v.reference === verse.reference && v.text === verse.text);
+      if (!exists) {
+        return [...previous, verse].slice(-300);
+      }
+      return previous;
+    });
+  };
+
+  const markChecklistAction = (actionKey) => {
+    const todayTag = getTodayTag();
+    setDailyChecklist((previous) => {
+      const current = previous[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false, completionCount: 0 };
+      const updated = { ...current, [actionKey]: true };
+
+      // Incrementa completionCount se é primeira vez ou é re-completion mesmo dia
+      if (updated.moodLogged && updated.verseRead && updated.explanationRead) {
+        if (!current.completedAt) {
+          // Primeira vez completa no dia
+          updated.completedAt = Date.now();
+          updated.completionCount = (current.completionCount || 0) + 1;
+        } else {
+          // Re-completion no mesmo dia
+          updated.completionCount = (current.completionCount || 0) + 1;
+        }
+      }
+
+      return { ...previous, [todayTag]: updated };
+    });
+  };
+
+  const addJourneyAction = (actionKey) => {
+    setJourneyStats((previous) => ({
+      ...previous,
+      [actionKey]: (previous[actionKey] || 0) + 1,
+    }));
+  };
+
   const handleNextVerse = async () => {
+    const verseState = currentVerse ? (verseProgress[getVerseKey(currentVerse)] || { heard: false, completed: false }) : null;
+    if (currentVerse && (!verseState?.heard || !verseState?.completed)) {
+      alert('Para seguir para o próximo, ouça o versículo atual e marque como concluído.');
+      return;
+    }
+
     if (currentIndex < history.length - 1) {
       const nextIndex = currentIndex + 1;
       setCurrentIndex(nextIndex);
@@ -265,21 +960,35 @@ export default function DevocionalApp() {
     }
 
     setIsLoadingVerse(true);
-    const tryOnline = isOnline && Math.random() > 0.3; // 70% de chance de online para variar mais
+
+    // Rotina offline: Se offline e tem seenVerses, rotaciona entre vistos
+    if (!isOnline && seenVerses.length > 0) {
+      const recentReferences = history.slice(-5).map((verse) => verse.reference);
+      const offlinePool = seenVerses.filter((verse) => !recentReferences.includes(verse.reference));
+      const pool = offlinePool.length > 0 ? offlinePool : seenVerses;
+      const randomVerse = pool[Math.floor(Math.random() * pool.length)];
+      const newHistory = [...history, randomVerse];
+      setHistory(newHistory);
+      setCurrentIndex(newHistory.length - 1);
+      setCurrentVerse(randomVerse);
+      setShowExplanation(false);
+      alert('Você está offline. Estamos mostrando versículos já vistos; para receber novos e uma experiência melhor, conecte-se à internet.');
+      setIsLoadingVerse(false);
+      return;
+    }
+
     let newVerse = null;
 
-    if (tryOnline) {
-      newVerse = await fetchFromAPI();
+    if (isOnline) {
+      const nextReference = getNextOnlineReference();
+      newVerse = await fetchByReferenceFromAPI(nextReference);
     }
 
     if (!newVerse) {
-      let availableVerses = LOCAL_DATABASE.filter(v =>
-        !history.slice(-10).some(h => h.id === v.id)
-      );
-      if (availableVerses.length === 0) availableVerses = LOCAL_DATABASE;
-      const randomLocal = availableVerses[Math.floor(Math.random() * availableVerses.length)];
-      newVerse = { ...randomLocal, source: 'local' };
+      newVerse = getNextCycleVerse();
     }
+
+    saveSeenVerse(newVerse);
 
     const newHistory = [...history, newVerse];
     setHistory(newHistory);
@@ -287,6 +996,30 @@ export default function DevocionalApp() {
     setCurrentVerse(newVerse);
     setShowExplanation(false);
     setIsLoadingVerse(false);
+  };
+
+  const handleMoodSupport = () => {
+    const cleanedMood = moodInput.trim();
+    if (!cleanedMood) return;
+
+    const moodScore = getMoodScore(cleanedMood);
+    const todayTag = getTodayTag();
+    const now = new Date();
+
+    setComfortMessage(buildComfortMessage(cleanedMood));
+    markChecklistAction('moodLogged');
+    addJourneyAction('moodLogs');
+    setMoodHistory((previous) => [
+      ...previous,
+      {
+        tag: todayTag,
+        mood: cleanedMood,
+        score: moodScore,
+        message: buildComfortMessage(cleanedMood),
+        time: getBrasiliaClock(now),
+      },
+    ].slice(-120));
+    setMoodInput('');
   };
 
   const handlePrevious = () => {
@@ -324,6 +1057,95 @@ export default function DevocionalApp() {
       alert("Copiado para a área de transferência!");
     }
   };
+
+  const handleReferenceSearch = async (queryOverride) => {
+    const query = normalizeReferenceInput(queryOverride ?? referenceInput);
+    if (!query) return;
+
+    setIsLoadingVerse(true);
+
+    let searchedVerse = await fetchByReferenceFromAPI(query);
+
+    if (!searchedVerse) {
+      const normalizedQuery = normalizeText(query);
+      const localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference) === normalizedQuery);
+      if (localMatch) {
+        searchedVerse = { ...localMatch, source: 'local' };
+      }
+    }
+
+    if (!searchedVerse) {
+      alert('Não encontramos essa referência. Tente algo como João 3:16 ou Salmos 23:4.');
+      setIsLoadingVerse(false);
+      return;
+    }
+
+    const newHistory = [...history, searchedVerse];
+    setHistory(newHistory);
+    setCurrentIndex(newHistory.length - 1);
+    setCurrentVerse(searchedVerse);
+    setShowExplanation(false);
+    saveSeenVerse(searchedVerse);
+    addJourneyAction('referenceSearches');
+    setRecentReferences((previous) => {
+      const filtered = previous.filter((item) => item.toLowerCase() !== query.toLowerCase());
+      return [query, ...filtered].slice(0, 3);
+    });
+    setReferenceInput('');
+    setIsLoadingVerse(false);
+  };
+
+  const todayTag = getTodayTag();
+  const todayChecklist = dailyChecklist[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false };
+  const completionPercent = Math.round((Number(todayChecklist.moodLogged) + Number(todayChecklist.verseRead) + Number(todayChecklist.explanationRead)) / 3 * 100);
+  const currentVerseProgress = currentVerse ? (verseProgress[getVerseKey(currentVerse)] || { heard: false, completed: false }) : { heard: false, completed: false };
+  const canAdvanceVerse = Boolean(currentVerse && currentVerseProgress.heard && currentVerseProgress.completed);
+
+  // Streaks e Badges
+  const consecutiveDays = (() => {
+    let count = 0;
+    let date = new Date();
+    while (true) {
+      const tag = getBrasiliaDateTag(date);
+      if (!dailyChecklist[tag]?.completedAt) break;
+      count += 1;
+      date.setDate(date.getDate() - 1);
+    }
+    return count;
+  })();
+
+  const totalCompletions = Object.values(dailyChecklist).reduce((sum, day) => sum + (day.completionCount || 0), 0);
+  const totalContentConsumed = journeyStats.verseReads + journeyStats.explanationReads + journeyStats.referenceSearches;
+  const journeyPoints = (
+    journeyStats.verseReads * JOURNEY_POINTS.verseRead
+    + journeyStats.explanationReads * JOURNEY_POINTS.explanationRead
+    + journeyStats.moodLogs * JOURNEY_POINTS.moodLog
+    + journeyStats.referenceSearches * JOURNEY_POINTS.referenceSearch
+  );
+
+  const readerBadge = (() => {
+    if (journeyPoints >= 1500 || totalCompletions >= 60 || consecutiveDays >= 30) return { text: 'Leitor Fiel a Deus ✨', color: 'text-purple-600' };
+    if (journeyPoints >= 700 || totalCompletions >= 30 || consecutiveDays >= 14) return { text: 'Discípulo Constante 🙏', color: 'text-blue-600' };
+    if (journeyPoints >= 220 || totalCompletions >= 10 || consecutiveDays >= 5) return { text: 'Leitor Dedicado 📖', color: 'text-green-600' };
+    return { text: 'Iniciando Jornada 🌱', color: 'text-orange-600' };
+  })();
+
+  const weekDays = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (6 - index));
+    const tag = getBrasiliaDateTag(date);
+    const dayNumber = tag.slice(8, 10);
+    const dayData = dailyChecklist[tag];
+    const done = Boolean(dayData?.completedAt);
+    const fire = Math.max((dayData?.completionCount || 0) - 1, 0);
+    return {
+      tag,
+      dayNumber,
+      weekday: getBrasiliaWeekday(date),
+      done,
+      fire,
+    };
+  });
 
   if (!currentVerse && !isLoadingVerse) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-amber-500 font-bold tracking-widest animate-pulse">CONECTANDO AO CÉU...</div>;
 
@@ -377,8 +1199,8 @@ export default function DevocionalApp() {
       {/* Header */}
       <header className="relative z-10 flex justify-between items-center p-6 text-white">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 bg-white/10 rounded-xl backdrop-blur-md border border-white/10 shadow-lg">
-            <BookOpen className="w-6 h-6 text-amber-400" />
+          <div className="p-1.5 bg-white/10 rounded-xl backdrop-blur-md border border-white/10 shadow-lg">
+            <img src="/icon-app.png" alt="LUMINA" className="w-9 h-9 object-contain" />
           </div>
           <div>
             <h1 className="text-2xl font-bold tracking-tight leading-none text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-300">LUMINA</h1>
@@ -387,7 +1209,7 @@ export default function DevocionalApp() {
         </div>
         <div className="flex gap-3">
           <div className={`flex items-center px-3 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase border ${isOnline ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-red-500/20 text-red-300 border-red-500/30'}`}>
-            {isOnline ? 'On' : 'Off'}
+            {isOnline ? 'Conectado' : 'Sem internet'}
           </div>
           <button
             onClick={toggleNotifications}
@@ -406,6 +1228,103 @@ export default function DevocionalApp() {
 
       {/* Main Content */}
       <main className="relative z-10 flex-1 flex flex-col px-6 pt-2 pb-6 max-w-3xl mx-auto w-full">
+        <div className="mb-3 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
+          <div className="flex items-center justify-between mb-3 text-[11px] uppercase tracking-widest font-bold text-slate-400">
+            <div className="flex items-center gap-2">
+              <span>Semanal com Deus</span>
+              <span className={`text-xs px-2 py-1 rounded-lg font-bold ${readerBadge.color}`}>{readerBadge.text}</span>
+            </div>
+            <span>Brasília {getBrasiliaClock(currentTime)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            {weekDays.map((day) => (
+              <div key={day.tag} className="flex flex-col items-center gap-0.5">
+                <span className="text-[10px] font-semibold text-slate-400 uppercase">{day.weekday}</span>
+                <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border ${day.done ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
+                  {day.dayNumber}
+                </div>
+                {day.fire > 0 && (
+                  <div className="text-[9px] tracking-tight">
+                    {Array.from({ length: Math.min(day.fire, 3) }).map((_, i) => <span key={i}>🔥</span>)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-3 gap-2 mb-3">
+            <div className={`text-[10px] px-2 py-1 rounded-lg border font-bold uppercase tracking-wide ${todayChecklist.moodLogged ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>Sentimento</div>
+            <div className={`text-[10px] px-2 py-1 rounded-lg border font-bold uppercase tracking-wide ${todayChecklist.verseRead ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>Versículo concluído</div>
+            <div className={`text-[10px] px-2 py-1 rounded-lg border font-bold uppercase tracking-wide ${todayChecklist.explanationRead ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>Entendimento concluído</div>
+          </div>
+          <p className="text-xs font-semibold text-slate-500 mb-2">Progresso de hoje: {completionPercent}%</p>
+          <p className="text-xs font-semibold text-blue-700 mb-1">Pontuação da jornada: {journeyPoints} pts</p>
+          <p className="text-[11px] text-slate-500">Conteúdos consumidos: {totalContentConsumed} • Sentimentos registrados: {journeyStats.moodLogs}</p>
+        </div>
+
+        <div className="mb-3 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={moodInput}
+              onChange={(event) => setMoodInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') handleMoodSupport();
+              }}
+              placeholder="Como você se sente hoje?"
+              className="flex-1 h-11 px-4 rounded-xl border border-slate-200 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+            />
+            <button
+              onClick={handleMoodSupport}
+              className="h-11 px-4 rounded-xl bg-amber-500 text-white text-xs font-bold tracking-wide uppercase hover:bg-amber-400"
+            >
+              Acolher
+            </button>
+          </div>
+          {comfortMessage && (
+            <p className="mt-3 text-sm text-slate-600 leading-relaxed">
+              {comfortMessage}
+            </p>
+          )}
+        </div>
+
+        <div className="mb-4 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={referenceInput}
+              onChange={(event) => setReferenceInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') handleReferenceSearch();
+              }}
+              placeholder="Buscar referência (ex: João 3:16)"
+              className="flex-1 h-11 px-4 rounded-xl border border-slate-200 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200"
+            />
+            <button
+              onClick={handleReferenceSearch}
+              disabled={isLoadingVerse}
+              className="h-11 px-4 rounded-xl bg-blue-700 text-white text-xs font-bold tracking-wide uppercase hover:bg-blue-600 disabled:opacity-60"
+            >
+              Buscar
+            </button>
+          </div>
+          {recentReferences.length > 0 && (
+            <div className="mt-3">
+              <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Últimas buscas</p>
+              <div className="flex flex-wrap gap-2">
+                {recentReferences.map((item) => (
+                  <button
+                    key={item}
+                    onClick={() => handleReferenceSearch(item)}
+                    className="text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-600 bg-slate-50 hover:bg-slate-100"
+                  >
+                    {item}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
         <div className="flex-1 flex flex-col justify-center py-4">
           <div className={`bg-white rounded-[2rem] shadow-[0_20px_50px_-12px_rgba(30,58,138,0.2)] p-8 md:p-12 relative overflow-hidden transition-all duration-500 border border-slate-100 ${isLoadingVerse ? 'opacity-90 scale-[0.99] blur-sm' : 'opacity-100 scale-100'}`}>
 
@@ -450,6 +1369,23 @@ export default function DevocionalApp() {
               </button>
 
               <button
+                onClick={handleReadVerse}
+                className="group p-4 rounded-2xl bg-slate-50 border border-slate-100 text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-100 transition-all active:scale-95"
+                title="Ouvir versículo"
+              >
+                {isSpeaking ? <VolumeX size={20} className="group-hover:scale-105 transition-transform" /> : <Volume2 size={20} className="group-hover:scale-105 transition-transform" />}
+              </button>
+
+              <button
+                onClick={handleMarkVerseAsRead}
+                className="group inline-flex items-center gap-2 px-4 py-4 rounded-2xl bg-emerald-50 border border-emerald-100 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-200 transition-all active:scale-95 text-xs font-bold uppercase tracking-wide"
+                title="Marcar como concluído"
+              >
+                <Check size={18} className="group-hover:scale-105 transition-transform" />
+                Concluído
+              </button>
+
+              <button
                 onClick={toggleExplanation}
                 disabled={isLoadingVerse}
                 className={`flex-1 max-w-xs flex items-center justify-center gap-2 px-6 py-4 rounded-2xl font-bold text-sm tracking-wide transition-all shadow-lg active:scale-95
@@ -488,6 +1424,24 @@ export default function DevocionalApp() {
                   <p className="text-slate-700 leading-relaxed text-sm md:text-base font-medium">
                     {currentVerse.ai_explanation}
                   </p>
+                  <button
+                    onClick={handleReadExplanation}
+                    className="mt-4 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-indigo-600 hover:text-indigo-500"
+                  >
+                    {isSpeaking ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                    Ouvir entendimento ({voiceLabel})
+                  </button>
+                  <button
+                    onClick={() => {
+                      saveSeenVerse(currentVerse);
+                      markChecklistAction('explanationRead');
+                      addJourneyAction('explanationReads');
+                    }}
+                    className="mt-4 ml-4 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-emerald-600 hover:text-emerald-500"
+                  >
+                    <Check size={14} />
+                    Concluído
+                  </button>
                 </div>
               </div>
             </div>
@@ -524,11 +1478,11 @@ export default function DevocionalApp() {
 
           <button
             onClick={handleNextVerse}
-            disabled={isLoadingVerse}
-            className="flex items-center gap-3 pl-5 pr-4 h-12 rounded-xl bg-slate-900 text-white hover:bg-slate-800 active:scale-95 transition-all shadow-lg shadow-slate-900/10 group"
+            disabled={isLoadingVerse || !canAdvanceVerse}
+            className={`flex items-center gap-3 pl-5 pr-4 h-12 rounded-xl transition-all shadow-lg group ${isLoadingVerse || !canAdvanceVerse ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-slate-200/20' : 'bg-slate-900 text-white hover:bg-slate-800 active:scale-95 shadow-slate-900/10'}`}
           >
-            <span className="font-bold text-xs tracking-wide uppercase">Próximo</span>
-            <div className="w-6 h-6 rounded bg-white/20 flex items-center justify-center group-hover:translate-x-1 transition-transform">
+            <span className="font-bold text-xs tracking-wide uppercase">{canAdvanceVerse ? 'Próximo' : 'Ouça e conclua'}</span>
+            <div className={`w-6 h-6 rounded flex items-center justify-center transition-transform ${canAdvanceVerse ? 'bg-white/20 group-hover:translate-x-1' : 'bg-slate-300'}`}>
               <ChevronRight size={14} />
             </div>
           </button>
