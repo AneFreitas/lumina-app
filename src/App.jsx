@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { loadCloudAppState, saveCloudAppState } from './firebase.js';
@@ -168,11 +168,18 @@ const buildReferenceCandidates = (reference = '') => {
 
 const isReferenceLikeQuery = (query = '') => /\d/.test(query) || /[:.]/.test(query);
 
-const searchLocalVerses = (query, limit = 30) => {
+const SEARCH_STOPWORDS = new Set(['a', 'o', 'e', 'de', 'da', 'do', 'das', 'dos', 'para', 'por', 'com', 'sem', 'em', 'no', 'na', 'nos', 'nas', 'um', 'uma', 'sobre']);
+
+const buildSearchTokens = (query = '') => normalizeText(query)
+  .split(/\s+/)
+  .filter((token) => token && token.length > 1 && !SEARCH_STOPWORDS.has(token));
+
+const searchLocalVerses = (query, limit = 30, themeFilter = '') => {
   const normalizedQuery = normalizeText(query);
   if (!normalizedQuery) return [];
 
-  const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+  const tokens = buildSearchTokens(query);
+  const normalizedThemeFilter = normalizeText(themeFilter);
   const matches = [];
 
   for (const verse of LOCAL_DATABASE) {
@@ -181,6 +188,8 @@ const searchLocalVerses = (query, limit = 30) => {
     const normalizedTheme = normalizeText(verse.theme || '');
     const normalizedExplanation = normalizeText(verse.ai_explanation || '');
     const normalizedBook = normalizedReference.split(/\s+\d/)[0] || normalizedReference;
+
+    if (normalizedThemeFilter && normalizedTheme !== normalizedThemeFilter) continue;
 
     let score = 0;
 
@@ -194,11 +203,12 @@ const searchLocalVerses = (query, limit = 30) => {
     if (normalizedTextValue.includes(normalizedQuery)) score += 50;
     if (normalizedExplanation.includes(normalizedQuery)) score += 20;
 
-    if (tokens.length > 1) {
+    if (tokens.length > 0) {
       let matchedTokens = 0;
       for (const token of tokens) {
         if (
           normalizedReference.includes(token)
+          || normalizedBook.includes(token)
           || normalizedTextValue.includes(token)
           || normalizedTheme.includes(token)
           || normalizedExplanation.includes(token)
@@ -220,6 +230,52 @@ const searchLocalVerses = (query, limit = 30) => {
     .sort((a, b) => b._score - a._score || a.reference.localeCompare(b.reference, 'pt-BR'))
     .slice(0, limit)
     .map(({ _score, ...verse }) => verse);
+};
+
+const SEARCH_BOOK_OPTIONS = Array.from(new Set(
+  LOCAL_DATABASE
+    .map((verse) => String(verse.reference || '').match(/^((?:[1-3]\s*)?[A-Za-zÀ-ÿ]+)/)?.[1]?.trim())
+    .filter(Boolean)
+)).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+
+const SEARCH_THEME_OPTIONS = Array.from(new Set(
+  LOCAL_DATABASE
+    .map((verse) => String(verse.theme || '').trim())
+    .filter(Boolean)
+)).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+
+const buildSearchSuggestions = (query, themeFilter = '') => {
+  const normalizedQuery = normalizeText(query);
+  if (normalizedQuery.length < 2) return [];
+
+  const suggestions = [];
+  const seen = new Set();
+
+  for (const book of SEARCH_BOOK_OPTIONS) {
+    if (normalizeText(book).startsWith(normalizedQuery) && !seen.has(book)) {
+      seen.add(book);
+      suggestions.push(book);
+      if (suggestions.length >= 4) break;
+    }
+  }
+
+  for (const theme of SEARCH_THEME_OPTIONS) {
+    if (normalizeText(theme).startsWith(normalizedQuery) && !seen.has(theme)) {
+      seen.add(theme);
+      suggestions.push(theme);
+      if (suggestions.length >= 6) break;
+    }
+  }
+
+  for (const verse of searchLocalVerses(query, 8, themeFilter)) {
+    if (!seen.has(verse.reference)) {
+      seen.add(verse.reference);
+      suggestions.push(verse.reference);
+    }
+    if (suggestions.length >= 8) break;
+  }
+
+  return suggestions.slice(0, 8);
 };
 
 // --- SIMULADOR DE IA (FALLBACK) ---
@@ -435,6 +491,8 @@ export default function DevocionalApp() {
   const [referenceInput, setReferenceInput] = useState('');
   const [recentReferences, setRecentReferences] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
+  const [selectedThemeFilter, setSelectedThemeFilter] = useState('');
+  const [isAiSearching, setIsAiSearching] = useState(false);
   const [journeyStats, setJourneyStats] = useState({ verseReads: 0, explanationReads: 0, moodLogs: 0, referenceSearches: 0 });
   const [moodInput, setMoodInput] = useState('');
   const [comfortMessage, setComfortMessage] = useState('');
@@ -474,6 +532,10 @@ export default function DevocionalApp() {
     : '';
   const BACKEND_TTS_VOICE_NAME = String(import.meta.env.VITE_TTS_VOICE_NAME ?? 'pt-BR-Neural2-B');
   const FIRESTORE_SYNC_ENABLED = String(import.meta.env.VITE_ENABLE_FIRESTORE_SYNC ?? 'true').toLowerCase() === 'true';
+  const searchSuggestions = useMemo(
+    () => buildSearchSuggestions(referenceInput, selectedThemeFilter),
+    [referenceInput, selectedThemeFilter],
+  );
 
   const notificationInterval = useRef(null);
   const sendNotificationRef = useRef(null);
@@ -1425,6 +1487,68 @@ export default function DevocionalApp() {
     setSearchResults([]);
   };
 
+  const handleAiSearch = async () => {
+    const query = String(referenceInput || '').trim();
+    if (!query) return;
+
+    const candidates = searchLocalVerses(query, 80, selectedThemeFilter).map((verse) => ({
+      id: String(verse.id),
+      reference: verse.reference,
+      theme: verse.theme || '',
+      text: String(verse.text || '').slice(0, 260),
+      ai_explanation: String(verse.ai_explanation || '').slice(0, 260),
+    }));
+
+    if (candidates.length === 0) {
+      alert('Não encontrei candidatos suficientes na base para a IA ranquear. Tente outra palavra-chave ou remova o filtro de tema.');
+      return;
+    }
+
+    const fallbackRankedResults = candidates
+      .slice(0, 8)
+      .map((candidate) => LOCAL_DATABASE.find((verse) => String(verse.id) === String(candidate.id)))
+      .filter(Boolean)
+      .map((verse) => ({ ...verse, source: 'local' }));
+
+    setIsAiSearching(true);
+    setSearchResults([]);
+
+    try {
+      const response = await fetch(`${BACKEND_TTS_BASE_URL}/api/search-ai`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query, candidates }),
+      });
+
+      if (!response.ok) throw new Error('Falha na busca com IA');
+
+      const payload = await response.json();
+      const rankedIds = Array.isArray(payload?.rankedIds) ? payload.rankedIds.map(String) : [];
+      const rankedResults = rankedIds
+        .map((id) => LOCAL_DATABASE.find((verse) => String(verse.id) === id))
+        .filter(Boolean)
+        .map((verse) => ({ ...verse, source: 'local' }));
+
+      if (rankedResults.length === 1) {
+        navigateToSearchResult(rankedResults[0]);
+        return;
+      }
+
+      if (rankedResults.length > 1) {
+        setSearchResults(rankedResults);
+      } else {
+        setSearchResults(fallbackRankedResults);
+      }
+    } catch (error) {
+      console.error('Falha na busca com IA:', error);
+      setSearchResults(fallbackRankedResults);
+    } finally {
+      setIsAiSearching(false);
+    }
+  };
+
   const handleReferenceSearch = async (queryOverride) => {
     const query = normalizeReferenceInput(queryOverride ?? referenceInput);
     if (!query) return;
@@ -1433,7 +1557,7 @@ export default function DevocionalApp() {
     setSearchResults([]);
 
     let searchedVerse = null;
-    const localMatches = searchLocalVerses(query, 40);
+    const localMatches = searchLocalVerses(query, 40, selectedThemeFilter);
 
     if (localMatches.length === 1) {
       [searchedVerse] = localMatches;
@@ -1679,7 +1803,7 @@ export default function DevocionalApp() {
         </div>
 
         <div className="mb-4 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
-          <div className="flex gap-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <input
               type="text"
               value={referenceInput}
@@ -1697,6 +1821,41 @@ export default function DevocionalApp() {
             >
               Buscar
             </button>
+            <button
+              onClick={handleAiSearch}
+              disabled={isLoadingVerse || isAiSearching || !referenceInput.trim()}
+              className="h-11 px-4 rounded-xl bg-violet-700 text-white text-xs font-bold tracking-wide uppercase hover:bg-violet-600 disabled:opacity-60"
+            >
+              {isAiSearching ? 'IA...' : 'IA'}
+            </button>
+          </div>
+          <div className="mt-3 flex flex-col gap-3">
+            <select
+              value={selectedThemeFilter}
+              onChange={(event) => setSelectedThemeFilter(event.target.value)}
+              className="h-10 px-3 rounded-xl border border-slate-200 text-sm text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200"
+            >
+              <option value="">Todos os temas</option>
+              {SEARCH_THEME_OPTIONS.map((theme) => (
+                <option key={theme} value={theme}>{theme}</option>
+              ))}
+            </select>
+            {referenceInput.trim().length >= 2 && searchSuggestions.length > 0 && searchResults.length === 0 && (
+              <div>
+                <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Sugestões</p>
+                <div className="flex flex-wrap gap-2">
+                  {searchSuggestions.map((item) => (
+                    <button
+                      key={item}
+                      onClick={() => handleReferenceSearch(item)}
+                      className="text-xs px-3 py-1.5 rounded-full border border-blue-100 text-blue-700 bg-blue-50 hover:bg-blue-100"
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           {recentReferences.length > 0 && searchResults.length === 0 && (
             <div className="mt-3">

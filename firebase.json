@@ -19,6 +19,14 @@
         "function": "tts"
       },
       {
+        "source": "/api/search-ai",
+        "function": "searchAi"
+      },
+      {
+        "source": "/api/search-ai/**",
+        "function": "searchAi"
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
