@@ -408,7 +408,13 @@ export default function DevocionalApp() {
   const [verseProgress, setVerseProgress] = useState({});
   const isNativePlatform = Capacitor.isNativePlatform();
   const USE_BACKEND_TTS = String(import.meta.env.VITE_USE_BACKEND_TTS ?? 'false').toLowerCase() === 'true';
-  const BACKEND_TTS_BASE_URL = String(import.meta.env.VITE_TTS_API_BASE_URL ?? '').trim();
+  const configuredTtsBaseUrl = String(import.meta.env.VITE_TTS_API_BASE_URL ?? '').trim();
+  const currentHostname = typeof window !== 'undefined' ? window.location.hostname : '';
+  const isCurrentHostLocal = /^(localhost|127\.0\.0\.1)$/i.test(currentHostname);
+  const isConfiguredTtsLocal = /localhost|127\.0\.0\.1/i.test(configuredTtsBaseUrl);
+  const BACKEND_TTS_BASE_URL = configuredTtsBaseUrl && (!isConfiguredTtsLocal || isCurrentHostLocal)
+    ? configuredTtsBaseUrl
+    : '';
   const BACKEND_TTS_VOICE_NAME = String(import.meta.env.VITE_TTS_VOICE_NAME ?? 'pt-BR-Neural2-B');
   const FIRESTORE_SYNC_ENABLED = String(import.meta.env.VITE_ENABLE_FIRESTORE_SYNC ?? 'true').toLowerCase() === 'true';
 
@@ -893,12 +899,13 @@ export default function DevocionalApp() {
   };
 
   const speakWithBackendTTS = async (text) => {
-    if (!USE_BACKEND_TTS || !BACKEND_TTS_BASE_URL) return false;
+    if (!USE_BACKEND_TTS) return false;
 
     const cloudVoiceName = CLOUD_VOICE_BY_GENDER[selectedVoiceGender] || BACKEND_TTS_VOICE_NAME;
+    const ttsEndpoint = `${BACKEND_TTS_BASE_URL}/api/tts`;
 
     try {
-      const response = await fetch(`${BACKEND_TTS_BASE_URL}/api/tts`, {
+      const response = await fetch(ttsEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
