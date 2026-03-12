@@ -219,6 +219,7 @@ const APP_STORAGE_KEY = 'lumina_app_state_v1';
 const DEVICE_ID_STORAGE_KEY = 'lumina_device_id_v1';
 const VOICE_PREFERENCE_STORAGE_KEY = 'lumina_voice_gender_v1';
 const MAX_DAILY_CHECKLIST_DAYS = 90;
+const MAX_DAILY_VERSE_PLAYS = 5;
 const RECENT_VARIETY_WINDOW = 21;
 const BRAZIL_TIMEZONE = 'America/Sao_Paulo';
 
@@ -1008,19 +1009,19 @@ export default function DevocionalApp() {
   };
 
   const speakText = async (text) => {
-    if (!text) return;
+    if (!text) return false;
     if (isSpeaking) {
       stopSpeech();
-      return;
+      return false;
     }
 
     const backendPlayed = await speakWithBackendTTS(text);
-    if (backendPlayed) return;
-    if (!('speechSynthesis' in window)) return;
+    if (backendPlayed) return true;
+    if (!('speechSynthesis' in window)) return false;
 
     const selectedVoice = chooseComfortVoice();
     const segments = splitSpeechSegments(text);
-    if (segments.length === 0) return;
+    if (segments.length === 0) return false;
 
     if (selectedVoice) setVoiceLabel(selectedVoice.name);
 
@@ -1055,15 +1056,32 @@ export default function DevocionalApp() {
     };
 
     speakNext();
+    return true;
   };
 
-  const handleReadVerse = () => {
+  const handleReadVerse = async () => {
     if (!currentVerse) return;
+    if (isSpeaking) {
+      stopSpeech();
+      return;
+    }
+
     const todayTag = getTodayTag();
+    const todayState = dailyChecklist[todayTag] || {};
+    const todayVerseAudioPlays = Number(todayState.verseAudioPlays) || 0;
+
+    if (todayVerseAudioPlays >= MAX_DAILY_VERSE_PLAYS) {
+      alert(`Você atingiu o limite diário de ${MAX_DAILY_VERSE_PLAYS} audições de versículos. A contagem reinicia amanhã.`);
+      return;
+    }
+
+    const started = await speakText(`Versículo de hoje, ${currentVerse.reference}. Ouça com calma. ${currentVerse.text}`);
+    if (!started) return;
+
     saveSeenVerse(currentVerse);
     addJourneyAction('verseReads');
     setDailyChecklist((previous) => {
-      const current = previous[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false, completionCount: 0, verseReferences: [] };
+      const current = previous[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false, completionCount: 0, verseReferences: [], verseAudioPlays: 0 };
       const verseReferences = Array.isArray(current.verseReferences) ? current.verseReferences : [];
       const nextVerseReferences = verseReferences.includes(currentVerse.reference)
         ? verseReferences
@@ -1074,11 +1092,11 @@ export default function DevocionalApp() {
         [todayTag]: {
           ...current,
           verseReferences: nextVerseReferences,
+          verseAudioPlays: (Number(current.verseAudioPlays) || 0) + 1,
         },
       };
     });
     markVerseProgress({ heard: true });
-    speakText(`Versículo de hoje, ${currentVerse.reference}. Ouça com calma. ${currentVerse.text}`);
   };
 
   const handleMarkVerseAsRead = () => {
@@ -1416,8 +1434,10 @@ export default function DevocionalApp() {
   };
 
   const todayTag = getTodayTag();
-  const todayChecklist = dailyChecklist[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false };
+  const todayChecklist = dailyChecklist[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false, verseAudioPlays: 0 };
   const completionPercent = Math.round((Number(todayChecklist.moodLogged) + Number(todayChecklist.verseRead) + Number(todayChecklist.explanationRead)) / 3 * 100);
+  const todayVerseAudioPlays = Number(todayChecklist.verseAudioPlays) || 0;
+  const remainingVerseAudioPlays = Math.max(0, MAX_DAILY_VERSE_PLAYS - todayVerseAudioPlays);
   const currentVerseProgress = currentVerse ? (verseProgress[getVerseKey(currentVerse)] || { heard: false, completed: false }) : { heard: false, completed: false };
   const canAdvanceVerse = Boolean(currentVerse && currentVerseProgress.heard && currentVerseProgress.completed);
 
@@ -1726,6 +1746,7 @@ export default function DevocionalApp() {
 
               <button
                 onClick={handleReadVerse}
+                disabled={!isSpeaking && remainingVerseAudioPlays === 0}
                 className="group p-4 rounded-2xl bg-slate-50 border border-slate-100 text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-100 transition-all active:scale-95"
                 title="Ouvir versículo"
               >
@@ -1762,6 +1783,11 @@ export default function DevocionalApp() {
                 )}
               </button>
             </div>
+            <p className="mt-4 text-center text-xs text-slate-500 z-10 relative">
+              Áudios de versículo hoje: <span className="font-bold text-slate-700">{todayVerseAudioPlays}/{MAX_DAILY_VERSE_PLAYS}</span>
+              {' · '}
+              {remainingVerseAudioPlays > 0 ? `${remainingVerseAudioPlays} restantes hoje` : 'limite diário atingido'}
+            </p>
           </div>
         </div>
 
