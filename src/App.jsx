@@ -446,11 +446,15 @@ export default function DevocionalApp() {
     setSupportPromptState((previous) => {
       const current = previous[todayTag] || {};
       if (current[slotKey]) return previous;
+
+      const shouldAlsoMarkNight = slotKey === 'firstEntryShown' && getBrasiliaHour(new Date()) >= 21;
+
       return {
         ...previous,
         [todayTag]: {
           ...current,
           [slotKey]: true,
+          ...(shouldAlsoMarkNight ? { nightShown: true } : {}),
         },
       };
     });
@@ -469,8 +473,17 @@ export default function DevocionalApp() {
     setCurrentIndex(safeIndex);
     setCurrentVerse(parsed.history[safeIndex]);
 
-    if (Array.isArray(parsed.localCycle)) setLocalCycle(parsed.localCycle);
-    if (typeof parsed.localCycleIndex === 'number') setLocalCycleIndex(parsed.localCycleIndex);
+    // Regenerate cycle if saved one is stale (library expanded significantly)
+    if (Array.isArray(parsed.localCycle) && parsed.localCycle.length >= LOCAL_DATABASE.length * 0.5) {
+      setLocalCycle(parsed.localCycle);
+      if (typeof parsed.localCycleIndex === 'number') setLocalCycleIndex(parsed.localCycleIndex);
+    } else {
+      const recentRefs = new Set((parsed.history || []).slice(-RECENT_VARIETY_WINDOW).map((v) => v.reference));
+      const freshPool = LOCAL_DATABASE.filter((v) => !recentRefs.has(v.reference));
+      const freshCycle = shuffleVerses(freshPool.length > 0 ? freshPool : LOCAL_DATABASE);
+      setLocalCycle(freshCycle);
+      setLocalCycleIndex(0);
+    }
     if (Array.isArray(parsed.onlineCycle)) setOnlineCycle(parsed.onlineCycle);
     if (typeof parsed.onlineCycleIndex === 'number') setOnlineCycleIndex(parsed.onlineCycleIndex);
     if (Array.isArray(parsed.notificationCycle)) setNotificationCycle(parsed.notificationCycle);
@@ -1328,14 +1341,27 @@ export default function DevocionalApp() {
 
     if (!searchedVerse) {
       const normalizedQuery = normalizeText(query);
-      const localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference) === normalizedQuery);
+      // 1) exact reference match
+      let localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference) === normalizedQuery);
+      // 2) partial reference match (e.g. "joão 3" finds João 3:16)
+      if (!localMatch) {
+        localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference).includes(normalizedQuery));
+      }
+      // 3) keyword in verse text
+      if (!localMatch) {
+        localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.text || '').includes(normalizedQuery));
+      }
+      // 4) keyword in theme
+      if (!localMatch) {
+        localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.theme || '').includes(normalizedQuery));
+      }
       if (localMatch) {
         searchedVerse = { ...localMatch, source: 'local' };
       }
     }
 
     if (!searchedVerse) {
-      alert('Não encontramos essa referência. Tente algo como João 3:16 ou Salmos 23:4.');
+      alert('Não encontramos essa referência. Tente algo como João 3:16, Salmos 23:4 ou uma palavra-chave como "amor".');
       setIsLoadingVerse(false);
       return;
     }
