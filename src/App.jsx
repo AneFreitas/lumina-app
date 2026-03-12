@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import { loadCloudAppState, saveCloudAppState } from './firebase.js';
+import { LOCAL_VERSE_LIBRARY } from './data/localVerseLibrary.js';
 import {
   BookOpen,
   ChevronRight,
@@ -21,7 +23,7 @@ import {
 } from 'lucide-react';
 
 // --- BANCO DE DADOS CURADO (SELEÇÃO "VERSÍCULOS DE OURO") ---
-const LOCAL_DATABASE = [
+const CURATED_LOCAL_DATABASE = [
   {
     id: 1,
     reference: "Filipenses 4:6-7",
@@ -172,11 +174,52 @@ const generateStaticFallback = (text) => {
   return "Este versículo é uma âncora para a alma, convidando-nos a confiar na fidelidade imutável de Deus.";
 };
 
+const buildLocalVerseExplanation = (verse) => {
+  const theme = verse?.theme ? `Tema central: ${verse.theme}. ` : '';
+  const fallback = generateStaticFallback(verse?.text || '');
+  return `${theme}${fallback} Em ${verse?.reference}, Deus nos chama a responder com fé prática, esperança firme e obediência no cotidiano.`.trim();
+};
+
+const LOCAL_DATABASE = (() => {
+  const merged = [...CURATED_LOCAL_DATABASE, ...LOCAL_VERSE_LIBRARY];
+  const uniqueVerses = [];
+  const seen = new Set();
+  const normalizeLibraryValue = (value = '') => String(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+
+  for (const verse of merged) {
+    const normalizedReference = String(verse.reference || '').trim();
+    const normalizedText = String(verse.text || '').replace(/\s+/g, ' ').trim();
+    if (!normalizedReference || !normalizedText) continue;
+
+    const key = `${normalizeLibraryValue(normalizedReference)}::${normalizeLibraryValue(normalizedText)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    uniqueVerses.push({
+      ...verse,
+      id: uniqueVerses.length + 1,
+      reference: normalizedReference,
+      text: normalizedText,
+      ai_explanation: verse.ai_explanation || buildLocalVerseExplanation(verse),
+    });
+  }
+
+  return uniqueVerses;
+})();
+
 const formatTime = (date) => {
   return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 };
 
 const APP_STORAGE_KEY = 'lumina_app_state_v1';
+const DEVICE_ID_STORAGE_KEY = 'lumina_device_id_v1';
+const VOICE_PREFERENCE_STORAGE_KEY = 'lumina_voice_gender_v1';
+const MAX_DAILY_CHECKLIST_DAYS = 90;
+const RECENT_VARIETY_WINDOW = 21;
 const BRAZIL_TIMEZONE = 'America/Sao_Paulo';
 
 const getBrasiliaDateTag = (date = new Date()) => {
@@ -208,7 +251,48 @@ const getBrasiliaWeekday = (date = new Date()) => {
   }).format(date).replace('.', '');
 };
 
+const getBrasiliaHour = (date = new Date()) => Number(new Intl.DateTimeFormat('en-GB', {
+  timeZone: BRAZIL_TIMEZONE,
+  hour: '2-digit',
+  hour12: false,
+}).format(date));
+
 const getTodayTag = () => getBrasiliaDateTag(new Date());
+
+const isValidVoiceGender = (value) => value === 'female' || value === 'male';
+
+const pruneDailyChecklist = (dailyChecklist = {}, maxDays = MAX_DAILY_CHECKLIST_DAYS) => {
+  if (!dailyChecklist || typeof dailyChecklist !== 'object') return {};
+
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - (maxDays - 1));
+  cutoffDate.setHours(0, 0, 0, 0);
+  const cutoffTime = cutoffDate.getTime();
+
+  return Object.entries(dailyChecklist).reduce((accumulator, [tag, value]) => {
+    const parsedDate = new Date(`${tag}T00:00:00`);
+    if (!Number.isNaN(parsedDate.getTime()) && parsedDate.getTime() >= cutoffTime) {
+      accumulator[tag] = value;
+    }
+    return accumulator;
+  }, {});
+};
+
+const getOrCreateDeviceId = () => {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+    if (existing) return existing;
+
+    const generated = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `device-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    localStorage.setItem(DEVICE_ID_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return null;
+  }
+};
 
 const getMoodScore = (moodRaw) => {
   const mood = moodRaw.toLowerCase();
@@ -303,6 +387,12 @@ export default function DevocionalApp() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceLabel, setVoiceLabel] = useState('Padrão');
   const [selectedVoiceGender, setSelectedVoiceGender] = useState('female');
+  const [showVoicePicker, setShowVoicePicker] = useState(false);
+  const [voiceSelectionRequired, setVoiceSelectionRequired] = useState(false);
+  const [showMoodPrompt, setShowMoodPrompt] = useState(false);
+  const [supportPromptState, setSupportPromptState] = useState({});
+  const [selectedCalendarTag, setSelectedCalendarTag] = useState(null);
+  const [hasBootstrapped, setHasBootstrapped] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [standbyMode, setStandbyMode] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -319,12 +409,15 @@ export default function DevocionalApp() {
   const USE_BACKEND_TTS = String(import.meta.env.VITE_USE_BACKEND_TTS ?? 'false').toLowerCase() === 'true';
   const BACKEND_TTS_BASE_URL = String(import.meta.env.VITE_TTS_API_BASE_URL ?? '').trim();
   const BACKEND_TTS_VOICE_NAME = String(import.meta.env.VITE_TTS_VOICE_NAME ?? 'pt-BR-Neural2-B');
+  const FIRESTORE_SYNC_ENABLED = String(import.meta.env.VITE_ENABLE_FIRESTORE_SYNC ?? 'true').toLowerCase() === 'true';
 
   const notificationInterval = useRef(null);
   const sendNotificationRef = useRef(null);
   const speechRef = useRef(null);
   const audioRef = useRef(null);
   const audioUrlRef = useRef(null);
+  const deviceIdRef = useRef(null);
+  const cloudSyncTimeoutRef = useRef(null);
   const NATIVE_NOTIFICATION_BASE_ID = 1000;
   const NOTIFICATION_DAYS_AHEAD = 15;
   const NOTIFICATIONS_PER_DAY = 3;
@@ -338,66 +431,150 @@ export default function DevocionalApp() {
     referenceSearch: 8,
   };
 
-  useEffect(() => {
-    if (BACKEND_TTS_VOICE_NAME) {
-      setSelectedVoiceGender(inferVoiceGender(BACKEND_TTS_VOICE_NAME));
+  const persistVoicePreference = useCallback((gender) => {
+    if (!isValidVoiceGender(gender)) return;
+    setSelectedVoiceGender(gender);
+    try {
+      localStorage.setItem(VOICE_PREFERENCE_STORAGE_KEY, gender);
+    } catch {
+      // noop
     }
-  }, [BACKEND_TTS_VOICE_NAME]);
+  }, []);
 
-  const restoreSavedState = () => {
+  const openMoodPromptForSlot = useCallback((slotKey) => {
+    const todayTag = getTodayTag();
+    setSupportPromptState((previous) => {
+      const current = previous[todayTag] || {};
+      if (current[slotKey]) return previous;
+      return {
+        ...previous,
+        [todayTag]: {
+          ...current,
+          [slotKey]: true,
+        },
+      };
+    });
+    setShowMoodPrompt(true);
+  }, []);
+
+  const applySavedState = useCallback((parsed) => {
+    if (!parsed || !Array.isArray(parsed.history) || parsed.history.length === 0) return false;
+
+    const sanitizedDailyChecklist = pruneDailyChecklist(parsed.dailyChecklist || {});
+
+    setHistory(parsed.history);
+    const safeIndex = typeof parsed.currentIndex === 'number'
+      ? Math.min(Math.max(parsed.currentIndex, 0), parsed.history.length - 1)
+      : parsed.history.length - 1;
+    setCurrentIndex(safeIndex);
+    setCurrentVerse(parsed.history[safeIndex]);
+
+    if (Array.isArray(parsed.localCycle)) setLocalCycle(parsed.localCycle);
+    if (typeof parsed.localCycleIndex === 'number') setLocalCycleIndex(parsed.localCycleIndex);
+    if (Array.isArray(parsed.onlineCycle)) setOnlineCycle(parsed.onlineCycle);
+    if (typeof parsed.onlineCycleIndex === 'number') setOnlineCycleIndex(parsed.onlineCycleIndex);
+    if (Array.isArray(parsed.notificationCycle)) setNotificationCycle(parsed.notificationCycle);
+    if (typeof parsed.notificationCycleIndex === 'number') setNotificationCycleIndex(parsed.notificationCycleIndex);
+    if (Array.isArray(parsed.seenVerses)) setSeenVerses(parsed.seenVerses);
+    if (parsed.verseProgress && typeof parsed.verseProgress === 'object') setVerseProgress(parsed.verseProgress);
+    if (Array.isArray(parsed.recentReferences)) setRecentReferences(parsed.recentReferences.slice(0, 3));
+    if (parsed.journeyStats && typeof parsed.journeyStats === 'object') {
+      setJourneyStats({
+        verseReads: Number(parsed.journeyStats.verseReads) || 0,
+        explanationReads: Number(parsed.journeyStats.explanationReads) || 0,
+        moodLogs: Number(parsed.journeyStats.moodLogs) || 0,
+        referenceSearches: Number(parsed.journeyStats.referenceSearches) || 0,
+      });
+    }
+    setNotificationsEnabled(Boolean(parsed.notificationsEnabled));
+    setDailyChecklist(sanitizedDailyChecklist);
+    if (Array.isArray(parsed.moodHistory)) setMoodHistory(parsed.moodHistory);
+    if (parsed.supportPromptState && typeof parsed.supportPromptState === 'object') {
+      setSupportPromptState(pruneDailyChecklist(parsed.supportPromptState, MAX_DAILY_CHECKLIST_DAYS));
+    }
+    if (isValidVoiceGender(parsed.selectedVoiceGender)) {
+      persistVoicePreference(parsed.selectedVoiceGender);
+    }
+
+    return true;
+  }, [persistVoicePreference]);
+
+  const restoreSavedState = useCallback(() => {
     try {
       const rawState = localStorage.getItem(APP_STORAGE_KEY);
       if (!rawState) return false;
 
       const parsed = JSON.parse(rawState);
-      if (!Array.isArray(parsed.history) || parsed.history.length === 0) return false;
-
-      setHistory(parsed.history);
-      const safeIndex = typeof parsed.currentIndex === 'number'
-        ? Math.min(Math.max(parsed.currentIndex, 0), parsed.history.length - 1)
-        : parsed.history.length - 1;
-      setCurrentIndex(safeIndex);
-      setCurrentVerse(parsed.history[safeIndex]);
-
-      if (Array.isArray(parsed.localCycle)) setLocalCycle(parsed.localCycle);
-      if (typeof parsed.localCycleIndex === 'number') setLocalCycleIndex(parsed.localCycleIndex);
-      if (Array.isArray(parsed.onlineCycle)) setOnlineCycle(parsed.onlineCycle);
-      if (typeof parsed.onlineCycleIndex === 'number') setOnlineCycleIndex(parsed.onlineCycleIndex);
-      if (Array.isArray(parsed.notificationCycle)) setNotificationCycle(parsed.notificationCycle);
-      if (typeof parsed.notificationCycleIndex === 'number') setNotificationCycleIndex(parsed.notificationCycleIndex);
-      if (Array.isArray(parsed.seenVerses)) setSeenVerses(parsed.seenVerses);
-      if (parsed.verseProgress && typeof parsed.verseProgress === 'object') setVerseProgress(parsed.verseProgress);
-      if (Array.isArray(parsed.recentReferences)) setRecentReferences(parsed.recentReferences.slice(0, 3));
-      if (parsed.journeyStats && typeof parsed.journeyStats === 'object') {
-        setJourneyStats({
-          verseReads: Number(parsed.journeyStats.verseReads) || 0,
-          explanationReads: Number(parsed.journeyStats.explanationReads) || 0,
-          moodLogs: Number(parsed.journeyStats.moodLogs) || 0,
-          referenceSearches: Number(parsed.journeyStats.referenceSearches) || 0,
-        });
-      }
-      setNotificationsEnabled(Boolean(parsed.notificationsEnabled));
-      if (parsed.dailyChecklist && typeof parsed.dailyChecklist === 'object') setDailyChecklist(parsed.dailyChecklist);
-      if (Array.isArray(parsed.moodHistory)) setMoodHistory(parsed.moodHistory);
-
-      return true;
+      return applySavedState(parsed);
     } catch (error) {
       console.error('Falha ao restaurar estado:', error);
       return false;
     }
-  };
+  }, [applySavedState]);
 
   useEffect(() => {
-    const restored = restoreSavedState();
-    if (!restored) {
-      const firstCycle = shuffleVerses(LOCAL_DATABASE);
-      const firstVerse = { ...firstCycle[0], source: 'local' };
-      setLocalCycle(firstCycle);
-      setLocalCycleIndex(1);
-      setHistory([firstVerse]);
-      setCurrentIndex(0);
-      setCurrentVerse(firstVerse);
-    }
+    let isMounted = true;
+
+    const bootstrap = async () => {
+      let restored = restoreSavedState();
+      deviceIdRef.current = getOrCreateDeviceId();
+
+      if (FIRESTORE_SYNC_ENABLED && deviceIdRef.current) {
+        let localLastSeenAt = 0;
+        try {
+          const localRaw = localStorage.getItem(APP_STORAGE_KEY);
+          if (localRaw) {
+            const localParsed = JSON.parse(localRaw);
+            localLastSeenAt = Number(localParsed?.lastSeenAt) || 0;
+          }
+        } catch {
+          localLastSeenAt = 0;
+        }
+
+        try {
+          const cloudState = await loadCloudAppState(deviceIdRef.current);
+          if (cloudState) {
+            const cloudLastSeenAt = Number(cloudState?.lastSeenAt) || 0;
+            if (!restored || cloudLastSeenAt > localLastSeenAt) {
+              restored = applySavedState(cloudState);
+            }
+          }
+        } catch {
+          // noop
+        }
+      }
+
+      if (!restored && isMounted) {
+        const firstCycle = shuffleVerses(LOCAL_DATABASE);
+        const firstVerse = { ...firstCycle[0], source: 'local' };
+        setLocalCycle(firstCycle);
+        setLocalCycleIndex(1);
+        setHistory([firstVerse]);
+        setCurrentIndex(0);
+        setCurrentVerse(firstVerse);
+      }
+
+      let storedVoice = null;
+      try {
+        storedVoice = localStorage.getItem(VOICE_PREFERENCE_STORAGE_KEY);
+      } catch {
+        storedVoice = null;
+      }
+
+      if (isMounted) {
+        if (isValidVoiceGender(storedVoice)) {
+          setSelectedVoiceGender(storedVoice);
+          setVoiceSelectionRequired(false);
+        } else {
+          setSelectedVoiceGender(inferVoiceGender(BACKEND_TTS_VOICE_NAME));
+          setVoiceSelectionRequired(true);
+          setShowVoicePicker(true);
+        }
+        setHasBootstrapped(true);
+      }
+    };
+
+    bootstrap();
 
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     const handleOnline = () => setIsOnline(true);
@@ -407,6 +584,7 @@ export default function DevocionalApp() {
     window.addEventListener('offline', handleOffline);
 
     return () => {
+      isMounted = false;
       clearInterval(timer);
       if (audioRef.current) {
         audioRef.current.pause();
@@ -417,13 +595,16 @@ export default function DevocionalApp() {
         audioUrlRef.current = null;
       }
       if (speechRef.current) window.speechSynthesis.cancel();
+      if (cloudSyncTimeoutRef.current) clearTimeout(cloudSyncTimeoutRef.current);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [FIRESTORE_SYNC_ENABLED, restoreSavedState, applySavedState, BACKEND_TTS_VOICE_NAME]);
 
   useEffect(() => {
     if (history.length === 0) return;
+    const sanitizedDailyChecklist = pruneDailyChecklist(dailyChecklist, MAX_DAILY_CHECKLIST_DAYS);
+    const sanitizedSupportPromptState = pruneDailyChecklist(supportPromptState, MAX_DAILY_CHECKLIST_DAYS);
     const payload = {
       history: history.slice(-200),
       currentIndex,
@@ -438,13 +619,39 @@ export default function DevocionalApp() {
       recentReferences: recentReferences.slice(0, 3),
       journeyStats,
       notificationsEnabled,
-      dailyChecklist,
+      dailyChecklist: sanitizedDailyChecklist,
+      supportPromptState: sanitizedSupportPromptState,
+      selectedVoiceGender,
       moodHistory: moodHistory.slice(-120),
       lastSeenAt: Date.now(),
       lastSeenDay: getTodayTag(),
     };
     localStorage.setItem(APP_STORAGE_KEY, JSON.stringify(payload));
-  }, [history, currentIndex, localCycle, localCycleIndex, onlineCycle, onlineCycleIndex, notificationCycle, notificationCycleIndex, seenVerses, verseProgress, recentReferences, journeyStats, notificationsEnabled, dailyChecklist, moodHistory]);
+
+    if (FIRESTORE_SYNC_ENABLED && deviceIdRef.current) {
+      if (cloudSyncTimeoutRef.current) clearTimeout(cloudSyncTimeoutRef.current);
+      cloudSyncTimeoutRef.current = setTimeout(() => {
+        saveCloudAppState(deviceIdRef.current, payload).catch(() => null);
+      }, 1200);
+    }
+  }, [history, currentIndex, localCycle, localCycleIndex, onlineCycle, onlineCycleIndex, notificationCycle, notificationCycleIndex, seenVerses, verseProgress, recentReferences, journeyStats, notificationsEnabled, dailyChecklist, supportPromptState, moodHistory, selectedVoiceGender, FIRESTORE_SYNC_ENABLED]);
+
+  useEffect(() => {
+    if (!hasBootstrapped || showVoicePicker || showMoodPrompt) return;
+
+    const todayTag = getTodayTag();
+    const todayState = supportPromptState[todayTag] || {};
+    const currentHour = getBrasiliaHour(currentTime);
+
+    if (!todayState.firstEntryShown) {
+      openMoodPromptForSlot('firstEntryShown');
+      return;
+    }
+
+    if (currentHour >= 21 && !todayState.nightShown) {
+      openMoodPromptForSlot('nightShown');
+    }
+  }, [hasBootstrapped, showVoicePicker, showMoodPrompt, supportPromptState, currentTime, openMoodPromptForSlot]);
 
   useEffect(() => {
     if (notificationsEnabled && !isNativePlatform) {
@@ -460,7 +667,7 @@ export default function DevocionalApp() {
   }, [notificationsEnabled, isNativePlatform]);
 
   const getNextCycleVerse = () => {
-    const recentReferences = history.slice(-5).map((verse) => verse.reference);
+    const recentReferences = history.slice(-RECENT_VARIETY_WINDOW).map((verse) => verse.reference);
     let activeCycle = localCycle;
     let activeIndex = localCycleIndex;
 
@@ -482,7 +689,7 @@ export default function DevocionalApp() {
   };
 
   const getNextOnlineReference = () => {
-    const recentRefs = history.slice(-10).map((verse) => normalizeText(verse.reference));
+    const recentRefs = history.slice(-RECENT_VARIETY_WINDOW).map((verse) => normalizeText(verse.reference));
     let activeCycle = onlineCycle;
     let activeIndex = onlineCycleIndex;
 
@@ -810,7 +1017,7 @@ export default function DevocionalApp() {
       const utterance = new SpeechSynthesisUtterance(segments[queueIndex]);
       if (selectedVoice) utterance.voice = selectedVoice;
       utterance.lang = 'pt-BR';
-      utterance.rate = 0.86;
+      utterance.rate = 1.06;
       utterance.pitch = 1.02;
       utterance.volume = 0.95;
       utterance.onend = () => {
@@ -831,8 +1038,24 @@ export default function DevocionalApp() {
 
   const handleReadVerse = () => {
     if (!currentVerse) return;
+    const todayTag = getTodayTag();
     saveSeenVerse(currentVerse);
     addJourneyAction('verseReads');
+    setDailyChecklist((previous) => {
+      const current = previous[todayTag] || { moodLogged: false, verseRead: false, explanationRead: false, completionCount: 0, verseReferences: [] };
+      const verseReferences = Array.isArray(current.verseReferences) ? current.verseReferences : [];
+      const nextVerseReferences = verseReferences.includes(currentVerse.reference)
+        ? verseReferences
+        : [...verseReferences, currentVerse.reference];
+
+      return {
+        ...previous,
+        [todayTag]: {
+          ...current,
+          verseReferences: nextVerseReferences,
+        },
+      };
+    });
     markVerseProgress({ heard: true });
     speakText(`Versículo de hoje, ${currentVerse.reference}. Ouça com calma. ${currentVerse.text}`);
   };
@@ -993,7 +1216,7 @@ export default function DevocionalApp() {
 
     // Rotina offline: Se offline e tem seenVerses, rotaciona entre vistos
     if (!isOnline && seenVerses.length > 0) {
-      const recentReferences = history.slice(-5).map((verse) => verse.reference);
+      const recentReferences = history.slice(-RECENT_VARIETY_WINDOW).map((verse) => verse.reference);
       const offlinePool = seenVerses.filter((verse) => !recentReferences.includes(verse.reference));
       const pool = offlinePool.length > 0 ? offlinePool : seenVerses;
       const randomVerse = pool[Math.floor(Math.random() * pool.length)];
@@ -1050,6 +1273,13 @@ export default function DevocionalApp() {
       },
     ].slice(-120));
     setMoodInput('');
+    setShowMoodPrompt(false);
+  };
+
+  const handleSelectVoiceGender = (gender) => {
+    persistVoicePreference(gender);
+    setVoiceSelectionRequired(false);
+    setShowVoicePicker(false);
   };
 
   const handlePrevious = () => {
@@ -1177,6 +1407,14 @@ export default function DevocionalApp() {
     };
   });
 
+  const selectedDayDetails = selectedCalendarTag
+    ? {
+        tag: selectedCalendarTag,
+        dayData: dailyChecklist[selectedCalendarTag] || {},
+        moods: moodHistory.filter((item) => item.tag === selectedCalendarTag),
+      }
+    : null;
+
   if (!currentVerse && !isLoadingVerse) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-amber-500 font-bold tracking-widest animate-pulse">CONECTANDO AO CÉU...</div>;
 
   // --- MODO STANDBY ---
@@ -1242,6 +1480,12 @@ export default function DevocionalApp() {
             {isOnline ? 'Conectado' : 'Sem internet'}
           </div>
           <button
+            onClick={() => setShowVoicePicker(true)}
+            className="px-3 h-10 rounded-full bg-white/5 text-slate-200 border border-white/10 hover:bg-white/10 transition-colors text-[10px] font-bold tracking-widest uppercase"
+          >
+            Voz {selectedVoiceGender === 'male' ? 'M' : 'F'}
+          </button>
+          <button
             onClick={toggleNotifications}
             className={`p-2.5 rounded-full transition-all duration-300 border ${notificationsEnabled ? 'bg-amber-500 text-white border-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.4)]' : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'}`}
           >
@@ -1268,7 +1512,7 @@ export default function DevocionalApp() {
           </div>
           <div className="flex items-center justify-between gap-2 mb-3">
             {weekDays.map((day) => (
-              <div key={day.tag} className="flex flex-col items-center gap-0.5">
+              <button key={day.tag} onClick={() => setSelectedCalendarTag(day.tag)} className="flex flex-col items-center gap-0.5 rounded-xl px-1 py-1 hover:bg-slate-50 transition-colors">
                 <span className="text-[10px] font-semibold text-slate-400 uppercase">{day.weekday}</span>
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border ${day.done ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
                   {day.dayNumber}
@@ -1278,9 +1522,10 @@ export default function DevocionalApp() {
                     {Array.from({ length: Math.min(day.fire, 3) }).map((_, i) => <span key={i}>🔥</span>)}
                   </div>
                 )}
-              </div>
+              </button>
             ))}
           </div>
+          <p className="text-[11px] text-slate-400 mb-3">Toque em um dia para ver versículos lidos e sentimentos registrados.</p>
           <div className="grid grid-cols-3 gap-2 mb-3">
             <div className={`text-[10px] px-2 py-1 rounded-lg border font-bold uppercase tracking-wide ${todayChecklist.moodLogged ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>Sentimento</div>
             <div className={`text-[10px] px-2 py-1 rounded-lg border font-bold uppercase tracking-wide ${todayChecklist.verseRead ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-slate-50 text-slate-500 border-slate-100'}`}>Versículo concluído</div>
@@ -1355,35 +1600,6 @@ export default function DevocionalApp() {
           )}
         </div>
 
-        {USE_BACKEND_TTS && (
-          <div className="mb-4 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
-            <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Voz natural (Google Cloud)</p>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <div className="flex-1 grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setSelectedVoiceGender('female')}
-                  className={`h-11 px-4 rounded-xl text-xs font-bold tracking-wide uppercase border transition-colors ${selectedVoiceGender === 'female' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
-                >
-                  Voz feminina
-                </button>
-                <button
-                  onClick={() => setSelectedVoiceGender('male')}
-                  className={`h-11 px-4 rounded-xl text-xs font-bold tracking-wide uppercase border transition-colors ${selectedVoiceGender === 'male' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
-                >
-                  Voz masculina
-                </button>
-              </div>
-              <button
-                onClick={handleVoicePreview}
-                className="h-11 px-4 rounded-xl bg-indigo-600 text-white text-xs font-bold tracking-wide uppercase hover:bg-indigo-500"
-              >
-                Ouvir exemplo
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-500 mt-2">Preferência: {getVoiceGenderLabel(selectedVoiceGender)} • Voz atual: {voiceLabel}</p>
-          </div>
-        )}
-
         <div className="flex-1 flex flex-col justify-center py-4">
           <div className={`bg-white rounded-[2rem] shadow-[0_20px_50px_-12px_rgba(30,58,138,0.2)] p-8 md:p-12 relative overflow-hidden transition-all duration-500 border border-slate-100 ${isLoadingVerse ? 'opacity-90 scale-[0.99] blur-sm' : 'opacity-100 scale-100'}`}>
 
@@ -1394,7 +1610,7 @@ export default function DevocionalApp() {
               <div className="mb-8">
                 <span className={`text-[10px] font-bold tracking-[0.3em] uppercase px-4 py-1.5 rounded-full border flex items-center gap-2 ${currentVerse?.source === 'online' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'}`}>
                   {currentVerse?.source === 'online' && <Globe size={10} />}
-                  {currentVerse?.source === 'online' ? 'Descoberta Online' : 'Versículo de Ouro'}
+                  Versículo
                 </span>
               </div>
 
@@ -1508,6 +1724,112 @@ export default function DevocionalApp() {
         )}
 
       </main>
+
+      {showVoicePicker && (
+        <div className="fixed inset-0 z-[70] bg-slate-950/45 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Escolha sua voz</p>
+                <h3 className="text-lg font-bold text-slate-800">Como você prefere ouvir?</h3>
+              </div>
+              {hasBootstrapped && !voiceSelectionRequired && (
+                <button onClick={() => setShowVoicePicker(false)} className="text-xs font-bold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                  Fechar
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                onClick={() => handleSelectVoiceGender('female')}
+                className={`h-12 rounded-2xl text-xs font-bold uppercase tracking-wide border transition-colors ${selectedVoiceGender === 'female' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}
+              >
+                Voz feminina
+              </button>
+              <button
+                onClick={() => handleSelectVoiceGender('male')}
+                className={`h-12 rounded-2xl text-xs font-bold uppercase tracking-wide border transition-colors ${selectedVoiceGender === 'male' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}
+              >
+                Voz masculina
+              </button>
+            </div>
+            <button
+              onClick={handleVoicePreview}
+              className="mt-4 w-full h-11 rounded-2xl bg-slate-900 text-white text-xs font-bold uppercase tracking-wide hover:bg-slate-800"
+            >
+              Ouvir exemplo
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showMoodPrompt && (
+        <div className="fixed inset-0 z-[65] bg-slate-950/35 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 p-5">
+            <p className="text-[11px] uppercase tracking-widest font-bold text-amber-500 mb-2">Acolher</p>
+            <h3 className="text-lg font-bold text-slate-800 mb-2">Como você se sente agora?</h3>
+            <p className="text-sm text-slate-500 mb-4">Escreva em poucas palavras para receber cuidado e registrar seu momento.</p>
+            <input
+              type="text"
+              value={moodInput}
+              onChange={(event) => setMoodInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') handleMoodSupport();
+              }}
+              placeholder="Ex: ansiosa, em paz, cansada"
+              className="w-full h-12 px-4 rounded-2xl border border-slate-200 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
+            />
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setShowMoodPrompt(false)} className="flex-1 h-11 rounded-2xl border border-slate-200 text-slate-600 text-xs font-bold uppercase tracking-wide hover:bg-slate-50">
+                Agora não
+              </button>
+              <button onClick={handleMoodSupport} className="flex-1 h-11 rounded-2xl bg-amber-500 text-white text-xs font-bold uppercase tracking-wide hover:bg-amber-400">
+                Acolher
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedDayDetails && (
+        <div className="fixed inset-0 z-[60] bg-slate-950/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setSelectedCalendarTag(null)}>
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-100 p-5" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400">Dia selecionado</p>
+                <h3 className="text-lg font-bold text-slate-800">{selectedDayDetails.tag}</h3>
+              </div>
+              <button onClick={() => setSelectedCalendarTag(null)} className="text-xs font-bold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                Fechar
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-1">Versículos lidos</p>
+                <p className="text-2xl font-bold text-slate-800">{Array.isArray(selectedDayDetails.dayData.verseReferences) ? selectedDayDetails.dayData.verseReferences.length : 0}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-1">Sentimentos</p>
+                <p className="text-sm font-semibold text-slate-700">{selectedDayDetails.moods.length > 0 ? `${selectedDayDetails.moods.length} registro(s)` : 'Não registrado'}</p>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Possíveis sentimentos</p>
+              {selectedDayDetails.moods.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {selectedDayDetails.moods.map((item, index) => (
+                    <span key={`${item.time}-${index}`} className="px-3 py-1.5 rounded-full bg-amber-50 text-amber-700 text-xs font-semibold border border-amber-100">
+                      {item.mood}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">Nenhum sentimento registrado nesse dia.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer Navigation */}
       <div className="bg-white border-t border-slate-100 p-4 pb-8 safe-area-bottom z-50 shadow-[0_-10px_40px_-20px_rgba(0,0,0,0.05)]">

@@ -28,7 +28,7 @@ const escapeXml = (unsafe = '') => unsafe
 
 const buildSoftSsml = (text = '') => {
   const safeText = escapeXml(text.trim());
-  return `<speak><prosody rate="90%" pitch="-1st">${safeText}</prosody></speak>`;
+  return `<speak><prosody rate="110%" pitch="-1st">${safeText}</prosody></speak>`;
 };
 
 const unique = (values) => Array.from(new Set(values.filter(Boolean)));
@@ -44,7 +44,7 @@ const callGoogleTts = async ({ text, voiceName, languageCode, audioEncoding }) =
     },
     audioConfig: {
       audioEncoding,
-      speakingRate: 0.92,
+      speakingRate: 1.12,
       pitch: -1.2,
       volumeGainDb: -1.0,
     },
