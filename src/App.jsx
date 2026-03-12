@@ -356,8 +356,8 @@ const ONLINE_REFERENCE_POOL = [
 ];
 
 const CLOUD_VOICE_BY_GENDER = {
-  female: 'pt-BR-Neural2-F',
-  male: 'pt-BR-Neural2-B',
+  female: 'pt-BR-Neural2-C',  // best available female (Studio needs OAuth)
+  male: 'pt-BR-Neural2-B',    // best available male
 };
 
 const inferVoiceGender = (voiceName = '') => {

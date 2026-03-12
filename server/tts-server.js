@@ -12,41 +12,29 @@ const port = Number(process.env.TTS_SERVER_PORT || 3001);
 const googleTtsApiKey = process.env.GOOGLE_TTS_API_KEY;
 
 const DEFAULT_VOICE_CANDIDATES = [
-  'pt-BR-Neural2-F',
-  'pt-BR-Neural2-C',
+  'pt-BR-Neural2-C',  // most natural female Neural2
+  'pt-BR-Neural2-B',  // most natural male Neural2
   'pt-BR-Neural2-A',
+  'pt-BR-Neural2-F',
   'pt-BR-Wavenet-A',
   'pt-BR-Wavenet-B',
 ];
-
-const escapeXml = (unsafe = '') => unsafe
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;')
-  .replace(/'/g, '&apos;');
-
-const buildSoftSsml = (text = '') => {
-  const safeText = escapeXml(text.trim());
-  return `<speak><prosody rate="110%" pitch="-1st">${safeText}</prosody></speak>`;
-};
 
 const unique = (values) => Array.from(new Set(values.filter(Boolean)));
 
 const callGoogleTts = async ({ text, voiceName, languageCode, audioEncoding }) => {
   const payload = {
-    input: {
-      ssml: buildSoftSsml(text),
-    },
+    input: { text: text.trim() },  // plain text — more natural than SSML for Neural2
     voice: {
       languageCode,
       name: voiceName,
     },
     audioConfig: {
       audioEncoding,
-      speakingRate: 1.12,
-      pitch: -1.2,
-      volumeGainDb: -1.0,
+      speakingRate: 1.2,   // +0.2x from natural: harmonious, not rushed
+      pitch: -1.0,         // slightly lower → warmer, less robotic
+      volumeGainDb: 0.0,
+      effectsProfileId: ['headphone-class-device'],  // highest quality processing
     },
   };
 
