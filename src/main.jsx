@@ -6,6 +6,12 @@ import './index.css' // Pode deixar este arquivo vazio se estiver usando o Tailw
 
 initializeFirebaseAnalytics().catch(() => null)
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => null)
+  })
+}
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <App />

@@ -271,13 +271,18 @@ const ONLINE_REFERENCE_POOL = [
   'Mateus 28:20', 'João 11:25', 'Romanos 12:2', 'Efésios 4:32', 'Filipenses 1:6', 'Colossenses 3:15', 'Hebreus 4:16', 'Tiago 4:8'
 ];
 
-const CLOUD_VOICE_OPTIONS = [
-  { value: 'pt-BR-Neural2-F', label: 'Neural2 F (suave)' },
-  { value: 'pt-BR-Neural2-C', label: 'Neural2 C (equilibrada)' },
-  { value: 'pt-BR-Neural2-A', label: 'Neural2 A (clara)' },
-  { value: 'pt-BR-Wavenet-A', label: 'Wavenet A' },
-  { value: 'pt-BR-Wavenet-B', label: 'Wavenet B' },
-];
+const CLOUD_VOICE_BY_GENDER = {
+  female: 'pt-BR-Neural2-F',
+  male: 'pt-BR-Neural2-B',
+};
+
+const inferVoiceGender = (voiceName = '') => {
+  const normalized = String(voiceName).toLowerCase();
+  if (normalized.includes('-b') || normalized.includes('masc') || normalized.includes('male')) return 'male';
+  return 'female';
+};
+
+const getVoiceGenderLabel = (gender) => (gender === 'male' ? 'Masculina' : 'Feminina');
 
 const getVerseKey = (verse) => `${verse?.id ?? verse?.reference ?? 'verse'}::${verse?.reference ?? ''}`;
 
@@ -297,7 +302,7 @@ export default function DevocionalApp() {
   const [showExplanation, setShowExplanation] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voiceLabel, setVoiceLabel] = useState('Padrão');
-  const [selectedCloudVoice, setSelectedCloudVoice] = useState('pt-BR-Neural2-F');
+  const [selectedVoiceGender, setSelectedVoiceGender] = useState('female');
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [standbyMode, setStandbyMode] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -334,7 +339,9 @@ export default function DevocionalApp() {
   };
 
   useEffect(() => {
-    if (BACKEND_TTS_VOICE_NAME) setSelectedCloudVoice(BACKEND_TTS_VOICE_NAME);
+    if (BACKEND_TTS_VOICE_NAME) {
+      setSelectedVoiceGender(inferVoiceGender(BACKEND_TTS_VOICE_NAME));
+    }
   }, [BACKEND_TTS_VOICE_NAME]);
 
   const restoreSavedState = () => {
@@ -667,6 +674,8 @@ export default function DevocionalApp() {
   const speakWithBackendTTS = async (text) => {
     if (!USE_BACKEND_TTS || !BACKEND_TTS_BASE_URL) return false;
 
+    const cloudVoiceName = CLOUD_VOICE_BY_GENDER[selectedVoiceGender] || BACKEND_TTS_VOICE_NAME;
+
     try {
       const response = await fetch(`${BACKEND_TTS_BASE_URL}/api/tts`, {
         method: 'POST',
@@ -676,7 +685,7 @@ export default function DevocionalApp() {
         body: JSON.stringify({
           text: humanizeSpeechText(text),
           languageCode: 'pt-BR',
-          voiceName: selectedCloudVoice || BACKEND_TTS_VOICE_NAME,
+          voiceName: cloudVoiceName,
           audioEncoding: 'MP3',
         }),
       });
@@ -713,7 +722,8 @@ export default function DevocionalApp() {
       const audio = new Audio(audioUrlRef.current);
       audio.preload = 'auto';
       audioRef.current = audio;
-      setVoiceLabel(`Google Cloud (${selectedCloudVoice || BACKEND_TTS_VOICE_NAME})`);
+      const resolvedVoiceName = response.headers.get('x-tts-voice') || cloudVoiceName;
+      setVoiceLabel(`Google Cloud (${resolvedVoiceName})`);
       setIsSpeaking(true);
 
       audio.onended = () => {
@@ -756,7 +766,10 @@ export default function DevocionalApp() {
     });
 
     const pool = preferredPool.length > 0 ? preferredPool : portugueseVoices;
-    const prioritizedTokens = ['neural', 'natural', 'microsoft', 'luciana', 'francisca', 'helena', 'antonio', 'daniel', 'ricardo', 'felipe', 'samsung', 'apple'];
+    const feminineTokens = ['female', 'feminina', 'woman', 'mulher', 'luciana', 'francisca', 'helena', 'maria', 'ana'];
+    const masculineTokens = ['male', 'masculina', 'man', 'homem', 'antonio', 'daniel', 'ricardo', 'felipe', 'joao'];
+    const preferredTokens = selectedVoiceGender === 'male' ? masculineTokens : feminineTokens;
+    const prioritizedTokens = [...preferredTokens, 'neural', 'natural', 'microsoft', 'samsung', 'apple'];
 
     for (const token of prioritizedTokens) {
       const found = pool.find((voice) => voice.name.toLowerCase().includes(token));
@@ -845,7 +858,7 @@ export default function DevocionalApp() {
   };
 
   const handleVoicePreview = () => {
-    speakText('Exemplo de voz suave. Deus está com você, com paz, cuidado e esperança para hoje.');
+    speakText(`Exemplo de voz ${getVoiceGenderLabel(selectedVoiceGender).toLowerCase()}. Deus está com você, com paz, cuidado e esperança para hoje.`);
   };
 
   // --- NOVA INTEGRAÇÃO: API DE CONTEXTO ---
@@ -1346,15 +1359,20 @@ export default function DevocionalApp() {
           <div className="mb-4 bg-white/90 border border-slate-100 rounded-2xl p-3 shadow-sm">
             <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Voz natural (Google Cloud)</p>
             <div className="flex flex-col sm:flex-row gap-2">
-              <select
-                value={selectedCloudVoice}
-                onChange={(event) => setSelectedCloudVoice(event.target.value)}
-                className="flex-1 h-11 px-3 rounded-xl border border-slate-200 text-sm text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-200"
-              >
-                {CLOUD_VOICE_OPTIONS.map((voice) => (
-                  <option key={voice.value} value={voice.value}>{voice.label}</option>
-                ))}
-              </select>
+              <div className="flex-1 grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setSelectedVoiceGender('female')}
+                  className={`h-11 px-4 rounded-xl text-xs font-bold tracking-wide uppercase border transition-colors ${selectedVoiceGender === 'female' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                >
+                  Voz feminina
+                </button>
+                <button
+                  onClick={() => setSelectedVoiceGender('male')}
+                  className={`h-11 px-4 rounded-xl text-xs font-bold tracking-wide uppercase border transition-colors ${selectedVoiceGender === 'male' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                >
+                  Voz masculina
+                </button>
+              </div>
               <button
                 onClick={handleVoicePreview}
                 className="h-11 px-4 rounded-xl bg-indigo-600 text-white text-xs font-bold tracking-wide uppercase hover:bg-indigo-500"
@@ -1362,7 +1380,7 @@ export default function DevocionalApp() {
                 Ouvir exemplo
               </button>
             </div>
-            <p className="text-[11px] text-slate-500 mt-2">Voz atual: {voiceLabel}</p>
+            <p className="text-[11px] text-slate-500 mt-2">Preferência: {getVoiceGenderLabel(selectedVoiceGender)} • Voz atual: {voiceLabel}</p>
           </div>
         )}
 
