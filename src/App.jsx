@@ -166,6 +166,62 @@ const buildReferenceCandidates = (reference = '') => {
   ].filter(Boolean)));
 };
 
+const isReferenceLikeQuery = (query = '') => /\d/.test(query) || /[:.]/.test(query);
+
+const searchLocalVerses = (query, limit = 30) => {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) return [];
+
+  const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+  const matches = [];
+
+  for (const verse of LOCAL_DATABASE) {
+    const normalizedReference = normalizeText(verse.reference || '');
+    const normalizedTextValue = normalizeText(verse.text || '');
+    const normalizedTheme = normalizeText(verse.theme || '');
+    const normalizedExplanation = normalizeText(verse.ai_explanation || '');
+    const normalizedBook = normalizedReference.split(/\s+\d/)[0] || normalizedReference;
+
+    let score = 0;
+
+    if (normalizedReference === normalizedQuery) score += 200;
+    if (normalizedReference.startsWith(normalizedQuery)) score += 120;
+    if (normalizedReference.includes(normalizedQuery)) score += 90;
+    if (normalizedBook === normalizedQuery) score += 100;
+    if (normalizedBook.startsWith(normalizedQuery)) score += 80;
+    if (normalizedTheme === normalizedQuery) score += 75;
+    if (normalizedTheme.includes(normalizedQuery)) score += 55;
+    if (normalizedTextValue.includes(normalizedQuery)) score += 50;
+    if (normalizedExplanation.includes(normalizedQuery)) score += 20;
+
+    if (tokens.length > 1) {
+      let matchedTokens = 0;
+      for (const token of tokens) {
+        if (
+          normalizedReference.includes(token)
+          || normalizedTextValue.includes(token)
+          || normalizedTheme.includes(token)
+          || normalizedExplanation.includes(token)
+        ) {
+          matchedTokens += 1;
+        }
+      }
+
+      if (matchedTokens === tokens.length) score += 65;
+      else if (matchedTokens > 0) score += matchedTokens * 10;
+    }
+
+    if (score > 0) {
+      matches.push({ ...verse, source: 'local', _score: score });
+    }
+  }
+
+  return matches
+    .sort((a, b) => b._score - a._score || a.reference.localeCompare(b.reference, 'pt-BR'))
+    .slice(0, limit)
+    .map(({ _score, ...verse }) => verse);
+};
+
 // --- SIMULADOR DE IA (FALLBACK) ---
 // Usado apenas se a API online falhar
 const generateStaticFallback = (text) => {
@@ -1376,44 +1432,24 @@ export default function DevocionalApp() {
     setIsLoadingVerse(true);
     setSearchResults([]);
 
-    let searchedVerse = await fetchByReferenceFromAPI(query);
+    let searchedVerse = null;
+    const localMatches = searchLocalVerses(query, 40);
 
-    if (!searchedVerse) {
-      const normalizedQuery = normalizeText(query);
-      // 1) exact reference match → navigate directly
-      let localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference) === normalizedQuery);
-      // 2) partial reference match → navigate directly
-      if (!localMatch) {
-        localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference).includes(normalizedQuery));
-      }
-      if (localMatch) {
-        searchedVerse = { ...localMatch, source: 'local' };
-      } else {
-        // 3+4) keyword in text or theme → collect multiple matches and show list
-        const seenIds = new Set();
-        const allMatches = [];
-        for (const verse of LOCAL_DATABASE) {
-          const nText = normalizeText(verse.text || '');
-          const nTheme = normalizeText(verse.theme || '');
-          if ((nText.includes(normalizedQuery) || nTheme.includes(normalizedQuery)) && !seenIds.has(verse.id)) {
-            seenIds.add(verse.id);
-            allMatches.push({ ...verse, source: 'local' });
-            if (allMatches.length >= 30) break;
-          }
-        }
-        if (allMatches.length === 1) {
-          searchedVerse = allMatches[0];
-        } else if (allMatches.length > 1) {
-          setSearchResults(allMatches);
-          setReferenceInput('');
-          setIsLoadingVerse(false);
-          return;
-        }
-      }
+    if (localMatches.length === 1) {
+      [searchedVerse] = localMatches;
+    } else if (localMatches.length > 1) {
+      setSearchResults(localMatches);
+      setReferenceInput('');
+      setIsLoadingVerse(false);
+      return;
+    }
+
+    if (!searchedVerse && isReferenceLikeQuery(query)) {
+      searchedVerse = await fetchByReferenceFromAPI(query);
     }
 
     if (!searchedVerse) {
-      alert('Não encontramos. Tente: João 3:16, Salmos 23:4, ou palavras como "amor", "fé", "esperança".');
+      alert('Não encontramos na base. Tente buscar por referência, livro, tema ou palavras do texto, como: João 3:16, Lucas, amor, esperança, perdão.');
       setIsLoadingVerse(false);
       return;
     }
@@ -1651,7 +1687,7 @@ export default function DevocionalApp() {
               onKeyDown={(event) => {
                 if (event.key === 'Enter') handleReferenceSearch();
               }}
-              placeholder="Buscar referência (ex: João 3:16)"
+              placeholder="Buscar livro, referência, tema ou palavra (ex: Lucas, João 3:16, amor)"
               className="flex-1 h-11 px-4 rounded-xl border border-slate-200 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200"
             />
             <button
