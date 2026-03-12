@@ -377,6 +377,7 @@ export default function DevocionalApp() {
   const [seenVerses, setSeenVerses] = useState([]);
   const [referenceInput, setReferenceInput] = useState('');
   const [recentReferences, setRecentReferences] = useState([]);
+  const [searchResults, setSearchResults] = useState([]);
   const [journeyStats, setJourneyStats] = useState({ verseReads: 0, explanationReads: 0, moodLogs: 0, referenceSearches: 0 });
   const [moodInput, setMoodInput] = useState('');
   const [comfortMessage, setComfortMessage] = useState('');
@@ -1331,37 +1332,63 @@ export default function DevocionalApp() {
     }
   };
 
+  const navigateToSearchResult = (verse) => {
+    const verseWithSource = { ...verse, source: verse.source || 'local' };
+    const newHistory = [...history, verseWithSource];
+    setHistory(newHistory);
+    setCurrentIndex(newHistory.length - 1);
+    setCurrentVerse(verseWithSource);
+    setShowExplanation(false);
+    saveSeenVerse(verseWithSource);
+    addJourneyAction('referenceSearches');
+    setSearchResults([]);
+  };
+
   const handleReferenceSearch = async (queryOverride) => {
     const query = normalizeReferenceInput(queryOverride ?? referenceInput);
     if (!query) return;
 
     setIsLoadingVerse(true);
+    setSearchResults([]);
 
     let searchedVerse = await fetchByReferenceFromAPI(query);
 
     if (!searchedVerse) {
       const normalizedQuery = normalizeText(query);
-      // 1) exact reference match
+      // 1) exact reference match → navigate directly
       let localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference) === normalizedQuery);
-      // 2) partial reference match (e.g. "joão 3" finds João 3:16)
+      // 2) partial reference match → navigate directly
       if (!localMatch) {
         localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.reference).includes(normalizedQuery));
       }
-      // 3) keyword in verse text
-      if (!localMatch) {
-        localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.text || '').includes(normalizedQuery));
-      }
-      // 4) keyword in theme
-      if (!localMatch) {
-        localMatch = LOCAL_DATABASE.find((verse) => normalizeText(verse.theme || '').includes(normalizedQuery));
-      }
       if (localMatch) {
         searchedVerse = { ...localMatch, source: 'local' };
+      } else {
+        // 3+4) keyword in text or theme → collect multiple matches and show list
+        const seenIds = new Set();
+        const allMatches = [];
+        for (const verse of LOCAL_DATABASE) {
+          const nText = normalizeText(verse.text || '');
+          const nTheme = normalizeText(verse.theme || '');
+          if ((nText.includes(normalizedQuery) || nTheme.includes(normalizedQuery)) && !seenIds.has(verse.id)) {
+            seenIds.add(verse.id);
+            allMatches.push({ ...verse, source: 'local' });
+            if (allMatches.length >= 30) break;
+          }
+        }
+        if (allMatches.length === 1) {
+          searchedVerse = allMatches[0];
+        } else if (allMatches.length > 1) {
+          setSearchResults(allMatches);
+          setReferenceInput('');
+          setIsLoadingVerse(false);
+          return;
+        }
       }
     }
 
     if (!searchedVerse) {
-      alert('Não encontramos essa referência. Tente algo como João 3:16, Salmos 23:4 ou uma palavra-chave como "amor".');
+      alert('Não encontramos. Tente: João 3:16, Salmos 23:4, ou palavras como "amor", "fé", "esperança".');
       setIsLoadingVerse(false);
       return;
     }
@@ -1608,7 +1635,7 @@ export default function DevocionalApp() {
               Buscar
             </button>
           </div>
-          {recentReferences.length > 0 && (
+          {recentReferences.length > 0 && searchResults.length === 0 && (
             <div className="mt-3">
               <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400 mb-2">Últimas buscas</p>
               <div className="flex flex-wrap gap-2">
@@ -1619,6 +1646,27 @@ export default function DevocionalApp() {
                     className="text-xs px-3 py-1.5 rounded-full border border-slate-200 text-slate-600 bg-slate-50 hover:bg-slate-100"
                   >
                     {item}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {searchResults.length > 0 && (
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[11px] uppercase tracking-widest font-bold text-slate-400">{searchResults.length} resultado{searchResults.length !== 1 ? 's' : ''} encontrado{searchResults.length !== 1 ? 's' : ''}</p>
+                <button onClick={() => setSearchResults([])} className="text-[11px] text-slate-400 hover:text-slate-600 px-2 py-0.5 rounded">✕ Fechar</button>
+              </div>
+              <div className="flex flex-col gap-2 max-h-72 overflow-y-auto pr-1">
+                {searchResults.map((verse) => (
+                  <button
+                    key={verse.id}
+                    onClick={() => navigateToSearchResult(verse)}
+                    className="text-left p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-amber-50 hover:border-amber-200 transition-colors"
+                  >
+                    <p className="text-xs font-bold text-blue-700 mb-1">{verse.reference}</p>
+                    <p className="text-xs text-slate-500 line-clamp-2">{verse.text}</p>
+                    {verse.theme && <p className="text-[10px] text-amber-600 mt-1 uppercase tracking-wide">{verse.theme}</p>}
                   </button>
                 ))}
               </div>
