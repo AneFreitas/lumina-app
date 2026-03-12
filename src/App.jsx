@@ -1031,7 +1031,7 @@ export default function DevocionalApp() {
       const utterance = new SpeechSynthesisUtterance(segments[queueIndex]);
       if (selectedVoice) utterance.voice = selectedVoice;
       utterance.lang = 'pt-BR';
-      utterance.rate = 1.06;
+      utterance.rate = 1.07;
       utterance.pitch = 1.02;
       utterance.volume = 0.95;
       utterance.onend = () => {

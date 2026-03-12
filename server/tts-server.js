@@ -31,7 +31,7 @@ const callGoogleTts = async ({ text, voiceName, languageCode, audioEncoding }) =
     },
     audioConfig: {
       audioEncoding,
-      speakingRate: 1.2,   // +0.2x from natural: harmonious, not rushed
+      speakingRate: 1.07,  // slightly faster, more natural and controlled
       pitch: -1.0,         // slightly lower → warmer, less robotic
       volumeGainDb: 0.0,
       effectsProfileId: ['headphone-class-device'],  // highest quality processing
